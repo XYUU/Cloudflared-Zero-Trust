@@ -23,6 +23,6 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
 add_compile_options(-Os -ffunction-sections -fdata-sections
-                    -march=armv5 -mfloat-abi=soft
+                    -march=armv5te -mfloat-abi=soft
                     -fno-exceptions -fno-rtti)
 add_link_options(-Wl,--gc-sections -Wl,--as-needed -s)
