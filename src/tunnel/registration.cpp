@@ -105,13 +105,10 @@ bool base64_decode(const std::string& in, std::vector<std::uint8_t>& out) {
 
 std::vector<std::uint8_t> encode_register_request(const RegisterRequest& req) {
     capnp::MallocMessageBuilder mb;
-    auto rpc = mb.initRoot<cfd_proto::RegisterCall>();   // wrapper generated alongside schema
-    (void)rpc;
     // NOTE: the real on-the-wire format is a capnp-rpc Call message, not the
-    // raw struct. We delegate that to the generated tunnelrpc client class —
-    // see TODO in docs/registration.md. For the spike we serialize the
-    // parameter struct alone and let the receiver complain in a useful way.
-    auto params = mb.initRoot<TunnelAuth>();
+    // raw struct. For the spike we serialize TunnelAuth alone and let the
+    // receiver complain in a useful way.
+    auto params = mb.initRoot<::TunnelAuth>();
     params.setAccountTag(req.auth.account_tag);
     params.setTunnelSecret(capnp::Data::Reader(
         req.auth.tunnel_secret.data(), req.auth.tunnel_secret.size()));
@@ -128,7 +125,7 @@ std::optional<RegisterResponse> decode_register_response(
             reinterpret_cast<const capnp::word*>(data),
             len / sizeof(capnp::word));
         capnp::FlatArrayMessageReader reader(words);
-        auto root = reader.getRoot<ConnectionResponse>();
+        auto root = reader.getRoot<::ConnectionResponse>();
 
         RegisterResponse out;
         if (root.getResult().isConnectionDetails()) {
