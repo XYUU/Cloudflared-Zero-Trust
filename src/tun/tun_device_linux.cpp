@@ -10,10 +10,8 @@
 #include <unistd.h>
 
 #if defined(__linux__)
-#include <linux/if.h>
-#include <linux/if_tun.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
+#include <net/if.h>        // ifreq — glibc header avoids conflicts with kernel headers
+#include <linux/if_tun.h>  // TUNSETIFF, IFF_TUN, IFF_NO_PI
 #endif
 
 namespace cfd::tun {

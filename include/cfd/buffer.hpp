@@ -4,9 +4,12 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <stdexcept>
+#if __cpp_exceptions
+#  include <stdexcept>
+#endif
 
 namespace cfd {
 
@@ -26,18 +29,27 @@ public:
     std::size_t         capacity() const noexcept { return cap_; }
 
     void resize(std::size_t n) {
-        if (n > cap_) throw std::length_error("Buffer::resize overflow");
+        if (n > cap_) [[unlikely]] overflow_("Buffer::resize overflow");
         len_ = n;
     }
     void clear() noexcept { len_ = 0; }
 
     void append(const void* p, std::size_t n) {
-        if (len_ + n > cap_) throw std::length_error("Buffer::append overflow");
+        if (len_ + n > cap_) [[unlikely]] overflow_("Buffer::append overflow");
         std::memcpy(data_.get() + len_, p, n);
         len_ += n;
     }
 
 private:
+    [[noreturn]] static void overflow_(const char* msg) {
+#if __cpp_exceptions
+        throw std::length_error(msg);
+#else
+        (void)msg;
+        std::terminate();
+#endif
+    }
+
     std::unique_ptr<std::uint8_t[]> data_;
     std::size_t cap_;
     std::size_t len_;

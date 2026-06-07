@@ -9,8 +9,6 @@
 
 @0xc082ef6e0d42ed1d;
 
-using Go = import "/go.capnp";   # cloudflared uses Go annotations; harmless here
-
 struct ConnectionOptions {
     client            @0 :ClientInfo;
     originLocalIp     @1 :Data;
