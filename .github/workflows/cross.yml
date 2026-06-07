@@ -33,8 +33,8 @@ jobs:
             toolchain: cmake/toolchains/arm-openwrt-musl.cmake
           - target: arm-eabi5
             apt:    ''
-            musl_url: https://musl.cc/arm-linux-musleabi-cross.tgz
-            prefix: arm-linux-musleabi-
+            musl_url: https://toolchains.bootlin.com/downloads/releases/toolchains/armv5-eabi/tarballs/armv5-eabi--musl--stable-2024.05-1.tar.xz
+            prefix: arm-buildroot-linux-musleabi-
             toolchain: cmake/toolchains/arm-eabi5-openwrt-musl.cmake
 
     steps:
@@ -60,7 +60,10 @@ jobs:
         if: matrix.musl_url != '' && steps.musl-cache.outputs.cache-hit != 'true'
         run: |
           sudo mkdir -p /opt/cross
-          curl -fsSL "${{ matrix.musl_url }}" | sudo tar -xz -C /opt/cross --strip-components=1
+          curl --retry 5 --retry-delay 5 --retry-all-errors -fSL \
+            "${{ matrix.musl_url }}" -o /tmp/cross.tar
+          sudo tar -xf /tmp/cross.tar -C /opt/cross --strip-components=1
+          rm -f /tmp/cross.tar
 
       - name: export musl toolchain to PATH
         if: matrix.musl_url != ''

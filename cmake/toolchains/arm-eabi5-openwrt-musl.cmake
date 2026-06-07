@@ -3,7 +3,7 @@ set(CMAKE_SYSTEM_NAME      Linux)
 set(CMAKE_SYSTEM_PROCESSOR arm)
 
 if(NOT CFD_TOOLCHAIN_PREFIX)
-    set(CFD_TOOLCHAIN_PREFIX "arm-linux-musleabi-")
+    set(CFD_TOOLCHAIN_PREFIX "arm-buildroot-linux-musleabi-")
 endif()
 
 set(CMAKE_C_COMPILER   ${CFD_TOOLCHAIN_PREFIX}gcc)
