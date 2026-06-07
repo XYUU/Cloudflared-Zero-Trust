@@ -24,5 +24,6 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
 add_compile_options(-Os -ffunction-sections -fdata-sections
                     -march=armv5te -mfloat-abi=soft
-                    -fno-exceptions -fno-rtti)
-add_link_options(-Wl,--gc-sections -Wl,--as-needed -s)
+                    -fno-exceptions -fno-rtti -fno-strict-aliasing)
+# Force static linking of libgcc and libstdc++ to avoid GLIBC version conflicts
+add_link_options(-Wl,--gc-sections -Wl,--as-needed -s -static-libgcc -static-libstdc++)

@@ -50,7 +50,8 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }} \
             -DCFD_TOOLCHAIN_PREFIX=${{ matrix.prefix }} \
             -DCFD_BUILD_TESTS=OFF \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc"
 
       - name: build (cfd binary only; QUIC stubbed)
         run: cmake --build build-${{ matrix.target }} --target cfd -j
