@@ -36,6 +36,10 @@ jobs:
             musl_url: https://toolchains.bootlin.com/downloads/releases/toolchains/armv5-eabi/tarballs/armv5-eabi--musl--stable-2024.05-1.tar.xz
             prefix: arm-buildroot-linux-musleabi-
             toolchain: cmake/toolchains/arm-eabi5-openwrt-musl.cmake
+          - target: linux-amd64
+            apt:    ''
+            prefix: ''
+            toolchain: ''
 
     steps:
       - uses: actions/checkout@v4
@@ -71,9 +75,12 @@ jobs:
 
       - name: configure
         run: |
+          EXTRA=""
+          if [ -n "${{ matrix.toolchain }}" ]; then
+            EXTRA="-DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }} -DCFD_TOOLCHAIN_PREFIX=${{ matrix.prefix }}"
+          fi
           cmake -B build-${{ matrix.target }} -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }} \
-            -DCFD_TOOLCHAIN_PREFIX=${{ matrix.prefix }} \
+            $EXTRA \
             -DCFD_BUILD_TESTS=OFF \
             -DCMAKE_BUILD_TYPE=Release
 
@@ -83,7 +90,8 @@ jobs:
       - name: size report
         run: |
           ls -la build-${{ matrix.target }}/src/cfd
-          ${{ matrix.prefix }}size build-${{ matrix.target }}/src/cfd || true
+          PREFIX="${{ matrix.prefix }}"
+          ${PREFIX}size build-${{ matrix.target }}/src/cfd || true
 
       - name: upload artifact
         uses: actions/upload-artifact@v4
