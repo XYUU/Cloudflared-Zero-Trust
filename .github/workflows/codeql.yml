@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '21 4 * * 1'   # weekly Mon 04:21 UTC
+
+jobs:
+  analyze:
+    name: analyze
+    runs-on: ubuntu-24.04
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: cpp
+          queries: security-and-quality
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake libcapnp-dev capnproto
+          cmake -B b -G Ninja -DCFD_BUILD_TESTS=OFF -DCFD_FETCH_MSQUIC=OFF
+          cmake --build b -j
+      - uses: github/codeql-action/analyze@v3

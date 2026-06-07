@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: Apache-2.0
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-build:
+    name: host ${{ matrix.os }} / ${{ matrix.cxx }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, cxx: g++,      sanitizers: ON  }
+          - { os: ubuntu-24.04, cxx: clang++,  sanitizers: ON  }
+    env:
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build cmake \
+            libcapnp-dev capnproto \
+            libssl-dev
+
+      - name: configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCFD_ENABLE_ASAN=${{ matrix.sanitizers }} \
+            -DCFD_ENABLE_UBSAN=${{ matrix.sanitizers }} \
+            -DCFD_FETCH_MSQUIC=OFF
+
+      - name: build
+        run: cmake --build build -j
+
+      - name: test
+        run: ctest --test-dir build --output-on-failure -j
+
+  fuzz-smoke:
+    name: fuzz smoke (60s per target)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake clang libcapnp-dev capnproto
+
+      - name: configure
+        run: |
+          cmake -B build-fuzz -G Ninja \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCFD_BUILD_TESTS=OFF -DCFD_BUILD_FUZZ=ON
+
+      - name: build
+        run: cmake --build build-fuzz -j --target fuzz_frame fuzz_registration fuzz_cidr
+
+      - name: run each target 60s
+        run: |
+          set -e
+          mkdir -p corpus_run
+          for t in fuzz_frame fuzz_registration fuzz_cidr; do
+            echo "== $t =="
+            ./build-fuzz/fuzz/$t -max_total_time=60 -print_final_stats=1 \
+                                 corpus_run fuzz/corpus/$t || true
+          done
+          # Any crash-* artifact means the run found a real bug.
+          if ls corpus_run/crash-* 2>/dev/null; then
+            echo "new crash found" && exit 1
+          fi
+
+      - name: upload corpus on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ github.run_id }}
+          path: corpus_run/
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y shellcheck
+      - run: shellcheck scripts/*.sh openwrt/files/etc/init.d/cfd

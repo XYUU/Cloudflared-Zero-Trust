@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Cross-compile sanity: we just need the binary to LINK for each target arch.
+# Functional tests run on host CI; runtime smoke on real hardware is manual.
+name: cross
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'cmake/toolchains/**'
+      - 'CMakeLists.txt'
+      - 'src/**'
+      - 'include/**'
+      - '.github/workflows/cross.yml'
+
+jobs:
+  cross:
+    name: cross ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: mipsel
+            apt:    gcc-mipsel-linux-gnu g++-mipsel-linux-gnu
+            prefix: mipsel-linux-gnu-
+            toolchain: cmake/toolchains/mipsel-openwrt-musl.cmake
+          - target: arm
+            apt:    gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+            prefix: arm-linux-gnueabihf-
+            toolchain: cmake/toolchains/arm-openwrt-musl.cmake
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake ${{ matrix.apt }}
+
+      - name: configure
+        run: |
+          cmake -B build-${{ matrix.target }} -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }} \
+            -DCFD_TOOLCHAIN_PREFIX=${{ matrix.prefix }} \
+            -DCFD_BUILD_TESTS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: build (cfd binary only; QUIC stubbed)
+        run: cmake --build build-${{ matrix.target }} --target cfd -j
+
+      - name: size report
+        run: |
+          ls -la build-${{ matrix.target }}/src/cfd
+          ${{ matrix.prefix }}size build-${{ matrix.target }}/src/cfd || true
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfd-${{ matrix.target }}-${{ github.sha }}
+          path: build-${{ matrix.target }}/src/cfd

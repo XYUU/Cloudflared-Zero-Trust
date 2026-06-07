@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Tag-triggered release. Builds stripped binaries for each target arch and
+# attaches them, plus a sha256 manifest, to the GitHub release.
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64,  apt: '',                              prefix: '',                          toolchain: '' }
+          - { target: mipsel,  apt: gcc-mipsel-linux-gnu g++-mipsel-linux-gnu,    prefix: mipsel-linux-gnu-,            toolchain: cmake/toolchains/mipsel-openwrt-musl.cmake }
+          - { target: arm,     apt: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf, prefix: arm-linux-gnueabihf-,      toolchain: cmake/toolchains/arm-openwrt-musl.cmake     }
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake libcapnp-dev capnproto ${{ matrix.apt }}
+
+      - name: configure (host)
+        if: matrix.target == 'x86_64'
+        run: |
+          cmake -B b -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCFD_FETCH_MSQUIC=ON \
+            -DCFD_BUILD_TESTS=OFF \
+            -DCFD_STRIP_BINARY=ON
+
+      - name: configure (cross)
+        if: matrix.target != 'x86_64'
+        run: |
+          cmake -B b -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }} \
+            -DCFD_TOOLCHAIN_PREFIX=${{ matrix.prefix }} \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCFD_BUILD_TESTS=OFF \
+            -DCFD_STRIP_BINARY=ON
+
+      - run: cmake --build b --target cfd -j
+
+      - name: package
+        run: |
+          mkdir -p out
+          cp b/src/cfd out/cfd-${{ github.ref_name }}-${{ matrix.target }}
+          ( cd out && sha256sum cfd-${{ github.ref_name }}-${{ matrix.target }} \
+                       > cfd-${{ github.ref_name }}-${{ matrix.target }}.sha256 )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cfd-${{ matrix.target }}
+          path: out/
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: extract section for tag from CHANGELOG.md
+        id: notes
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          awk -v t="$tag" '
+            $0 == "## " t { p=1; next }
+            p && /^## / { exit }
+            p
+          ' CHANGELOG.md > tag_notes.md
+          test -s tag_notes.md || echo "(no notes for $tag)" > tag_notes.md
+          cat tag_notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: tag_notes.md
+          files: dist/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
