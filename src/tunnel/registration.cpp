@@ -1,27 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// tunnelrpc.RegisterConnection encoder/decoder.
+// UUID and base64 helpers for the tunnelrpc client.
 //
-// When CFD_HAVE_CAPNP is defined we use the generated tunnelrpc schema
-// directly. Without it we fall back to a hand-rolled minimal Cap'n Proto
-// encoder that emits only what the edge needs to accept the call — used in
-// stub builds and on devices where shipping libcapnp is too fat.
-//
-// Memory: all allocations live inside capnp's MessageBuilder (arena-owned)
-// or std::vector. No naked new/delete. Failure paths unwind cleanly.
+// Memory: all allocations live inside std::vector. No naked new/delete.
 
 #include "cfd/registration.hpp"
-#include "cfd/log.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
-
-#ifdef CFD_HAVE_CAPNP
-#  include <capnp/message.h>
-#  include <capnp/serialize.h>
-#  include "tunnelrpc.capnp.h"
-#endif
 
 namespace cfd::tunnel {
 
@@ -98,71 +85,5 @@ bool base64_decode(const std::string& in, std::vector<std::uint8_t>& out) {
     }
     return true;
 }
-
-// ---------- Encoder ---------------------------------------------------------
-
-#ifdef CFD_HAVE_CAPNP
-
-std::vector<std::uint8_t> encode_register_request(const RegisterRequest& req) {
-    capnp::MallocMessageBuilder mb;
-    // NOTE: the real on-the-wire format is a capnp-rpc Call message, not the
-    // raw struct. For the spike we serialize TunnelAuth alone and let the
-    // receiver complain in a useful way.
-    auto params = mb.initRoot<::TunnelAuth>();
-    params.setAccountTag(req.auth.account_tag);
-    params.setTunnelSecret(capnp::Data::Reader(
-        req.auth.tunnel_secret.data(), req.auth.tunnel_secret.size()));
-
-    kj::Array<capnp::word> words = capnp::messageToFlatArray(mb);
-    kj::ArrayPtr<kj::byte> bytes = words.asBytes();
-    return std::vector<std::uint8_t>(bytes.begin(), bytes.end());
-}
-
-std::optional<RegisterResponse> decode_register_response(
-    const std::uint8_t* data, std::size_t len) noexcept {
-    try {
-        kj::ArrayPtr<const capnp::word> words(
-            reinterpret_cast<const capnp::word*>(data),
-            len / sizeof(capnp::word));
-        capnp::FlatArrayMessageReader reader(words);
-        auto root = reader.getRoot<::ConnectionResponse>();
-
-        RegisterResponse out;
-        if (root.getResult().isConnectionDetails()) {
-            auto d = root.getResult().getConnectionDetails();
-            auto uuid_data = d.getUuid();
-            if (uuid_data.size() == 16)
-                std::memcpy(out.assigned_uuid.data(), uuid_data.begin(), 16);
-            out.location_name = d.getLocationName().cStr();
-            out.ok = true;
-        } else {
-            auto e = root.getResult().getError();
-            out.error_cause         = e.getCause().cStr();
-            out.retry_after_seconds = e.getRetryAfter();
-            out.should_retry        = e.getShouldRetry();
-            out.ok                  = false;
-        }
-        return out;
-    } catch (...) {
-        return std::nullopt;
-    }
-}
-
-#else  // -------- no capnp at compile time --------
-
-std::vector<std::uint8_t> encode_register_request(const RegisterRequest& req) {
-    LOG_WARN("encode_register_request: capnp not compiled in; emitting empty buffer "
-             "(tunnel=%02x%02x%02x%02x... idx=%u acct_len=%zu)",
-             req.tunnel_uuid[0], req.tunnel_uuid[1], req.tunnel_uuid[2], req.tunnel_uuid[3],
-             req.conn_index, req.auth.account_tag.size());
-    return {};
-}
-
-std::optional<RegisterResponse> decode_register_response(
-    const std::uint8_t*, std::size_t) noexcept {
-    return std::nullopt;
-}
-
-#endif
 
 }  // namespace cfd::tunnel

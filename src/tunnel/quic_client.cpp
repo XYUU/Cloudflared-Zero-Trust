@@ -19,6 +19,10 @@
 //
 //   * Received-datagram buffers are owned by msquic and only valid during the
 //     callback. We copy out before invoking the user handler.
+//
+//   * MsquicAsyncStream owns its HQUIC stream handle (via detail::UniqueHandle).
+//     msquic holds a raw `this` pointer as the stream context, so the object
+//     must never be copied or moved (KJ_DISALLOW_COPY_AND_MOVE).
 
 #include "cfd/quic_client.hpp"
 #include "cfd/frame.hpp"
@@ -28,14 +32,22 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
-#include <unordered_map>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #ifdef CFD_HAVE_MSQUIC
 #  include "cfd/msquic_raii.hpp"
+#endif
+
+#if defined(CFD_HAVE_MSQUIC) && defined(CFD_HAVE_CAPNP)
+#  include <capnp/rpc-twoparty.h>
+#  include <kj/async.h>
+#  include <kj/exception.h>
+#  include "tunnelrpc.capnp.h"
 #endif
 
 namespace cfd::tunnel {
@@ -70,34 +82,243 @@ void api_table_release() noexcept {
 
 namespace {
 
-// Per-send context owned across the msquic C boundary. We unique_ptr::release()
-// into the QUIC_BUFFER.Buffer pointer's parent struct, then reclaim in the
-// SEND_COMPLETE callback.
+// Per-send context for QUIC datagrams owned across the msquic C boundary.
+// We unique_ptr::release() into the DatagramSend call, then reclaim in the
+// DATAGRAM_SEND_STATE_CHANGED callback.
 struct SendCtx {
     std::vector<std::uint8_t> bytes;
     QUIC_BUFFER               qb{};
 };
 
-// Per-control-stream state. The instance is owned by a shared_ptr in
-// QuicClientImpl::live_streams_. msquic's callback receives a raw pointer
-// (the map key); the shared_ptr keeps it alive until STREAM_SHUTDOWN_COMPLETE
-// removes the map entry. This is the only place we have to be careful about
-// the lifetime crossing the C boundary.
-struct StreamCtx {
-    void*                       parent{nullptr};   // QuicClientImpl* (forward-decl gymnastics)
-    detail::UniqueHandle        handle;
-    std::vector<std::uint8_t>   send_buf;
-    QUIC_BUFFER                 send_qb{};
-    std::vector<std::uint8_t>   recv_buf;
-    std::mutex                  mu;
-    std::condition_variable     cv;
-    bool                        done{false};
-    bool                        ok{false};
-};
-
 constexpr std::uint16_t kIdleTimeoutMs       = 30'000;
 constexpr std::uint16_t kHandshakeTimeoutMs  = 10'000;
 constexpr std::uint16_t kKeepAliveMs         = 5'000;
+
+#ifdef CFD_HAVE_CAPNP
+
+// ---------------------------------------------------------------------------
+// MsquicAsyncStream — bridges a msquic bidi stream to kj::AsyncIoStream.
+//
+// Lifetime contract:
+//   - The KJ event loop drives the RPC call synchronously via wait().
+//   - msquic callbacks arrive on a msquic worker thread and use
+//     CrossThreadPromiseFulfiller to wake the KJ loop.
+//   - msquic holds a raw `this` pointer as the stream context, so this object
+//     must not be moved or copied after StreamOpen.
+// ---------------------------------------------------------------------------
+class MsquicAsyncStream final : public kj::AsyncIoStream {
+public:
+    MsquicAsyncStream(const QUIC_API_TABLE* api, HQUIC connection) : api_(api) {
+        HQUIC raw = nullptr;
+        const QUIC_STATUS s = api_->StreamOpen(
+            connection,
+            QUIC_STREAM_OPEN_FLAG_NONE,
+            &MsquicAsyncStream::s_callback,
+            this,
+            &raw);
+        if (QUIC_FAILED(s))
+            KJ_FAIL_REQUIRE("StreamOpen failed", s);
+        stream_ = detail::wrap(raw, detail::HandleKind::Stream);
+
+        if (QUIC_FAILED(api_->StreamStart(stream_.get(), QUIC_STREAM_START_FLAG_IMMEDIATE))) {
+            stream_.reset();
+            KJ_FAIL_REQUIRE("StreamStart failed");
+        }
+    }
+
+    KJ_DISALLOW_COPY_AND_MOVE(MsquicAsyncStream);
+
+    ~MsquicAsyncStream() noexcept override {
+        // UniqueHandle dtor calls StreamClose, which drains all pending callbacks.
+    }
+
+    // tryRead: return bytes from recv_queue_ or park a wakeup fulfiller and retry.
+    kj::Promise<size_t> tryRead(void* dst, size_t minBytes, size_t maxBytes) override {
+        {
+            std::unique_lock<std::mutex> lk(mu_);
+            if (!recv_queue_.empty() || eof_) {
+                const size_t n = drainLocked(dst, maxBytes);
+                return kj::Promise<size_t>(n);
+            }
+        }
+
+        // No data available — create a cross-thread fulfiller so the msquic
+        // callback can wake us up.
+        auto paf = kj::newPromiseAndCrossThreadFulfiller<void>();
+
+        {
+            std::unique_lock<std::mutex> lk(mu_);
+            // Double-check: data may have arrived between the first check and
+            // acquiring the lock again.
+            if (!recv_queue_.empty() || eof_) {
+                const size_t n = drainLocked(dst, maxBytes);
+                return kj::Promise<size_t>(n);
+            }
+            read_wakeup_ = kj::mv(paf.fulfiller);
+        }
+
+        // When the fulfiller fires, recurse — data will be in recv_queue_.
+        return paf.promise.then([this, dst, minBytes, maxBytes]() {
+            return tryRead(dst, minBytes, maxBytes);
+        });
+    }
+
+    // write: heap-allocate an RpcSendCtx, call StreamSend, fulfill on SEND_COMPLETE.
+    kj::Promise<void> write(const void* src, size_t size) override {
+        auto ctx = std::make_unique<RpcSendCtx>();
+        ctx->buf.assign(
+            static_cast<const std::uint8_t*>(src),
+            static_cast<const std::uint8_t*>(src) + size);
+
+        auto paf = kj::newPromiseAndCrossThreadFulfiller<void>();
+        ctx->fulfiller = kj::mv(paf.fulfiller);
+
+        QUIC_BUFFER qb{};
+        qb.Buffer = ctx->buf.data();
+        qb.Length = static_cast<std::uint32_t>(ctx->buf.size());
+
+        // Release across the C boundary; reclaimed in SEND_COMPLETE.
+        RpcSendCtx* raw = ctx.release();
+        const QUIC_STATUS s = api_->StreamSend(
+            stream_.get(), &qb, 1, QUIC_SEND_FLAG_NONE, raw);
+        if (QUIC_FAILED(s)) {
+            // Reclaim immediately on failure.
+            std::unique_ptr<RpcSendCtx> reclaim(raw);
+            KJ_FAIL_REQUIRE("StreamSend failed", s);
+        }
+
+        return kj::mv(paf.promise);
+    }
+
+    // write(pieces): flatten into a single allocation, delegate.
+    kj::Promise<void> write(
+        kj::ArrayPtr<const kj::ArrayPtr<const kj::byte>> pieces) override {
+        size_t total = 0;
+        for (auto& p : pieces) total += p.size();
+        std::vector<std::uint8_t> flat;
+        flat.reserve(total);
+        for (auto& p : pieces)
+            flat.insert(flat.end(), p.begin(), p.end());
+        return write(flat.data(), flat.size());
+    }
+
+    void shutdownWrite() override {
+        api_->StreamShutdown(stream_.get(), QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
+    }
+
+    void abortRead() override {
+        api_->StreamShutdown(
+            stream_.get(),
+            static_cast<QUIC_STREAM_SHUTDOWN_FLAGS>(QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE),
+            QUIC_STATUS_ABORTED);
+    }
+
+    // whenWriteDisconnected: not tracked precisely — return a promise that
+    // never resolves (acceptable per the kj::AsyncIoStream contract; callers
+    // must not rely on this for correctness in our usage pattern).
+    kj::Promise<void> whenWriteDisconnected() override {
+        return kj::NEVER_DONE;
+    }
+
+    // Called from the watchdog thread when a timeout fires.
+    void abort() noexcept {
+        api_->StreamShutdown(
+            stream_.get(),
+            static_cast<QUIC_STREAM_SHUTDOWN_FLAGS>(
+                QUIC_STREAM_SHUTDOWN_FLAG_ABORT |
+                QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE),
+            QUIC_STATUS_ABORTED);
+    }
+
+private:
+    // Per-RPC-write context: owns the send buffer and the cross-thread
+    // fulfiller that fires when msquic signals SEND_COMPLETE.
+    struct RpcSendCtx {
+        std::vector<std::uint8_t>                      buf;
+        kj::Own<kj::CrossThreadPromiseFulfiller<void>> fulfiller;
+    };
+
+    // Drain bytes from recv_queue_ into dst (up to maxBytes). Caller holds mu_.
+    size_t drainLocked(void* dst, size_t maxBytes) {
+        std::uint8_t* out = static_cast<std::uint8_t*>(dst);
+        size_t copied = 0;
+        while (copied < maxBytes && !recv_queue_.empty()) {
+            Chunk& front = recv_queue_.front();
+            const size_t avail  = front.data.size() - front.off;
+            const size_t take   = std::min(avail, maxBytes - copied);
+            std::memcpy(out + copied, front.data.data() + front.off, take);
+            copied    += take;
+            front.off += take;
+            if (front.off == front.data.size())
+                recv_queue_.pop_front();
+        }
+        return copied;
+    }
+
+    static QUIC_STATUS QUIC_API s_callback(
+        HQUIC, void* ctx, QUIC_STREAM_EVENT* ev) noexcept {
+        return static_cast<MsquicAsyncStream*>(ctx)->onEvent(*ev);
+    }
+
+    QUIC_STATUS onEvent(QUIC_STREAM_EVENT& ev) noexcept {
+        switch (ev.Type) {
+            case QUIC_STREAM_EVENT_RECEIVE: {
+                kj::Own<kj::CrossThreadPromiseFulfiller<void>> wakeup;
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    for (std::uint32_t i = 0; i < ev.RECEIVE.BufferCount; ++i) {
+                        const auto& b = ev.RECEIVE.Buffers[i];
+                        if (b.Length > 0) {
+                            Chunk chunk;
+                            chunk.data.assign(b.Buffer, b.Buffer + b.Length);
+                            recv_queue_.push_back(std::move(chunk));
+                        }
+                    }
+                    if (ev.RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN)
+                        eof_ = true;
+                    wakeup = kj::mv(read_wakeup_);
+                }
+                if (wakeup) wakeup->fulfill();
+                break;
+            }
+            case QUIC_STREAM_EVENT_SEND_COMPLETE: {
+                // Reclaim the RpcSendCtx and fire the write promise.
+                auto* ctx = static_cast<RpcSendCtx*>(
+                    ev.SEND_COMPLETE.ClientContext);
+                if (ctx) {
+                    std::unique_ptr<RpcSendCtx> owned(ctx);
+                    if (owned->fulfiller) owned->fulfiller->fulfill();
+                }
+                break;
+            }
+            case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
+            case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED:
+            case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
+                kj::Own<kj::CrossThreadPromiseFulfiller<void>> wakeup;
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    eof_ = true;
+                    wakeup = kj::mv(read_wakeup_);
+                }
+                if (wakeup) wakeup->fulfill();
+                break;
+            }
+            default: break;
+        }
+        return QUIC_STATUS_SUCCESS;
+    }
+
+    const QUIC_API_TABLE* api_;
+    detail::UniqueHandle  stream_;
+
+    std::mutex mu_;
+    struct Chunk { std::vector<std::uint8_t> data; std::size_t off{0}; };
+    std::deque<Chunk> recv_queue_;
+    bool eof_{false};
+    kj::Own<kj::CrossThreadPromiseFulfiller<void>> read_wakeup_;
+};
+
+#endif  // CFD_HAVE_CAPNP
 
 }  // namespace
 
@@ -221,102 +442,104 @@ public:
         return {};
     }
 
-    // ---- Control stream: tunnelrpc.RegisterConnection ------------------
+    // ---- Control stream: tunnelrpc.RegisterConnection via capnp-rpc --------
     //
-    // Ownership note: the stream is held in a UniqueHandle scoped to this
-    // method. On any failure path — send failure, peer abort, timeout — the
-    // unique_ptr dtor runs StreamClose, releasing all msquic state.
+    // Opens a fresh bidi QUIC stream, wraps it in MsquicAsyncStream (which
+    // implements kj::AsyncIoStream), then drives a capnp::TwoPartyClient on
+    // top of it within a local KJ event loop.  Everything is synchronous from
+    // the caller's perspective; the KJ loop pumps I/O via wait().
     std::error_code register_connection(const RegisterRequest& req,
                                         RegisterResponse& resp_out,
                                         int timeout_ms) {
         if (!connection_ || !handshake_ok_)
             return std::make_error_code(std::errc::not_connected);
 
-        auto wire = encode_register_request(req);
-        if (wire.empty())
-            return std::make_error_code(std::errc::not_supported);
+#ifndef CFD_HAVE_CAPNP
+        LOG_WARN("register_connection: built without capnp");
+        return std::make_error_code(std::errc::not_supported);
+#else
+        kj::EventLoop loop;
+        kj::WaitScope waitScope(loop);
 
-        // Per-stream context. Lives on the heap because msquic invokes the
-        // callback on a worker thread for an arbitrary duration; we hand a
-        // shared_ptr to msquic via raw ptr and reclaim on STREAM_SHUTDOWN_COMPLETE.
-        auto ctx = std::make_shared<StreamCtx>();
-        ctx->parent = this;
+        KJ_IF_MAYBE(err, kj::runCatchingExceptions([&]() {
+            // stream owns the HQUIC; its dtor calls StreamClose synchronously.
+            auto stream = kj::heap<MsquicAsyncStream>(
+                detail::g_msquic, connection_.get());
 
-        HQUIC raw = nullptr;
-        if (QUIC_FAILED(detail::g_msquic->StreamOpen(
-                connection_.get(),
-                QUIC_STREAM_OPEN_FLAG_NONE,
-                &QuicClientImpl::s_stream_cb,
-                ctx.get(),
-                &raw)))
+            // Watchdog: abort the stream if the call takes too long.
+            std::atomic<bool> done{false};
+            auto watchdog = std::thread([&] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+                if (!done.load(std::memory_order_relaxed)) stream->abort();
+            });
+            // KJ_DEFER runs in LIFO order before stream is destroyed, so the
+            // watchdog is always joined before the stream handle disappears.
+            KJ_DEFER({ done.store(true, std::memory_order_relaxed); watchdog.join(); });
+
+            capnp::TwoPartyClient rpc(*stream);
+            auto cap = rpc.bootstrap().castAs<RegistrationServer>();
+
+            auto req_msg = cap.registerConnectionRequest();
+
+            // auth
+            {
+                auto auth = req_msg.initAuth();
+                auth.setAccountTag(req.auth.account_tag);
+                auth.setTunnelSecret(capnp::Data::Reader(
+                    req.auth.tunnel_secret.data(),
+                    req.auth.tunnel_secret.size()));
+            }
+            // tunnelId
+            req_msg.setTunnelId(capnp::Data::Reader(
+                req.tunnel_uuid.data(), req.tunnel_uuid.size()));
+            req_msg.setConnIndex(req.conn_index);
+
+            // options → client info
+            {
+                auto opts = req_msg.initOptions();
+                auto ci   = opts.initClient();
+                ci.setClientId(capnp::Data::Reader(
+                    req.tunnel_uuid.data(), req.tunnel_uuid.size()));
+                ci.setVersion(req.version);
+                ci.setArch(req.arch);
+                auto feats = ci.initFeatures(
+                    static_cast<unsigned>(req.features.size()));
+                for (unsigned i = 0;
+                     i < static_cast<unsigned>(req.features.size()); ++i)
+                    feats.set(i, req.features[i]);
+            }
+
+            // Drive the KJ event loop until we get a response.
+            auto result = req_msg.send().wait(waitScope).getResult();
+
+            if (result.isConnectionDetails()) {
+                auto d   = result.getConnectionDetails();
+                auto uid = d.getUuid();
+                if (uid.size() == 16)
+                    std::memcpy(resp_out.assigned_uuid.data(), uid.begin(), 16);
+                resp_out.location_name = d.getLocationName().cStr();
+                resp_out.ok = true;
+            } else {
+                auto e = result.getError();
+                resp_out.error_cause         = e.getCause().cStr();
+                resp_out.retry_after_seconds = e.getRetryAfter();
+                resp_out.should_retry        = e.getShouldRetry();
+                resp_out.ok                  = false;
+            }
+        })) {
+            LOG_ERROR("register_connection rpc: %s", err->getDescription().cStr());
             return std::make_error_code(std::errc::protocol_error);
-        ctx->handle = detail::wrap(raw, detail::HandleKind::Stream);
-        // Keep the shared_ptr alive while msquic might call back. We store it
-        // in a member set keyed by the raw pointer used as the context.
-        {
-            std::lock_guard<std::mutex> lk(streams_mu_);
-            live_streams_[ctx.get()] = ctx;
         }
 
-        // If StreamStart/Send fail we will never get SHUTDOWN_COMPLETE, so we
-        // must remove the live_streams_ entry ourselves on those paths.
-        auto purge_on_fail = [&]() noexcept {
-            std::lock_guard<std::mutex> lk(streams_mu_);
-            live_streams_.erase(ctx.get());
-        };
-
-        if (QUIC_FAILED(detail::g_msquic->StreamStart(
-                ctx->handle.get(), QUIC_STREAM_START_FLAG_IMMEDIATE))) {
-            purge_on_fail();
-            return std::make_error_code(std::errc::protocol_error);
-        }
-
-        // Send the request, FIN on the send side — server reads to EOF, replies.
-        ctx->send_buf = std::move(wire);
-        ctx->send_qb.Buffer = ctx->send_buf.data();
-        ctx->send_qb.Length = static_cast<std::uint32_t>(ctx->send_buf.size());
-        if (QUIC_FAILED(detail::g_msquic->StreamSend(
-                ctx->handle.get(), &ctx->send_qb, 1,
-                QUIC_SEND_FLAG_FIN, nullptr))) {
-            purge_on_fail();
-            return std::make_error_code(std::errc::io_error);
-        }
-
-        // Wait for response or timeout.
-        std::unique_lock<std::mutex> lk(ctx->mu);
-        const bool got = ctx->cv.wait_for(
-            lk, std::chrono::milliseconds(timeout_ms),
-            [&] { return ctx->done; });
-        if (!got) {
-            // Force STREAM_SHUTDOWN_COMPLETE so live_streams_ purges the entry.
-            // Without this the StreamCtx leaks for the lifetime of the QUIC
-            // connection. See docs/ISSUES.md ISSUE-002.
-            lk.unlock();
-            detail::g_msquic->StreamShutdown(
-                ctx->handle.get(),
-                static_cast<QUIC_STREAM_SHUTDOWN_FLAGS>(
-                    QUIC_STREAM_SHUTDOWN_FLAG_ABORT |
-                    QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE),
-                0);
-            return std::make_error_code(std::errc::timed_out);
-        }
-        if (!ctx->ok)
-            return std::make_error_code(std::errc::protocol_error);
-
-        auto resp = decode_register_response(ctx->recv_buf.data(),
-                                             ctx->recv_buf.size());
-        if (!resp)
-            return std::make_error_code(std::errc::bad_message);
-        resp_out = *resp;
         if (!resp_out.ok) {
             LOG_WARN("RegisterConnection rejected: %s (retry=%d after=%lld)",
-                     resp_out.error_cause.c_str(),
-                     resp_out.should_retry,
+                     resp_out.error_cause.c_str(), resp_out.should_retry,
                      static_cast<long long>(resp_out.retry_after_seconds));
             return std::make_error_code(std::errc::permission_denied);
         }
         LOG_INFO("RegisterConnection ok: location=%s", resp_out.location_name.c_str());
         return {};
+#endif  // CFD_HAVE_CAPNP
     }
 
     void send_packet(const std::uint8_t* data, std::size_t len) noexcept {
@@ -362,7 +585,8 @@ public:
 
 private:
     // --- Connection callback (msquic worker thread) ---
-    static QUIC_STATUS QUIC_API s_conn_cb(HQUIC, void* ctx, QUIC_CONNECTION_EVENT* ev) noexcept {
+    static QUIC_STATUS QUIC_API s_conn_cb(
+        HQUIC, void* ctx, QUIC_CONNECTION_EVENT* ev) noexcept {
         auto* self = static_cast<QuicClientImpl*>(ctx);
         return self->on_conn_event(*ev);
     }
@@ -414,51 +638,6 @@ private:
         return QUIC_STATUS_SUCCESS;
     }
 
-    // --- Stream callback (msquic worker thread) ---
-    static QUIC_STATUS QUIC_API s_stream_cb(HQUIC, void* ctx, QUIC_STREAM_EVENT* ev) noexcept {
-        auto* sc = static_cast<StreamCtx*>(ctx);
-        return static_cast<QuicClientImpl*>(sc->parent)->on_stream_event(sc, *ev);
-    }
-
-    QUIC_STATUS on_stream_event(StreamCtx* sc, QUIC_STREAM_EVENT& ev) noexcept {
-        switch (ev.Type) {
-            case QUIC_STREAM_EVENT_RECEIVE: {
-                std::lock_guard<std::mutex> lk(sc->mu);
-                for (std::uint32_t i = 0; i < ev.RECEIVE.BufferCount; ++i) {
-                    const auto& b = ev.RECEIVE.Buffers[i];
-                    sc->recv_buf.insert(sc->recv_buf.end(),
-                                        b.Buffer, b.Buffer + b.Length);
-                }
-                if (ev.RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) {
-                    sc->ok = true;
-                    sc->done = true;
-                    sc->cv.notify_all();
-                }
-                break;
-            }
-            case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
-            case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED: {
-                std::lock_guard<std::mutex> lk(sc->mu);
-                sc->ok = false;
-                sc->done = true;
-                sc->cv.notify_all();
-                break;
-            }
-            case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
-                {
-                    std::lock_guard<std::mutex> lk(sc->mu);
-                    if (!sc->done) { sc->done = true; sc->cv.notify_all(); }
-                }
-                // Drop the shared_ptr; sc may be deleted at the closing brace.
-                std::lock_guard<std::mutex> lk(streams_mu_);
-                live_streams_.erase(sc);
-                break;
-            }
-            default: break;
-        }
-        return QUIC_STATUS_SUCCESS;
-    }
-
     void deliver_inbound(const std::uint8_t* data, std::uint32_t len) noexcept {
         DecodeResult dr{};
         if (!decode(std::span<const std::uint8_t>(data, len), dr)) return;
@@ -473,10 +652,10 @@ private:
     }
 
     // Declaration order = construction order; reverse = destruction order.
-    // Members the msquic callbacks may touch (state_*, handler_, streams_*)
-    // must outlive `connection_`. ConnectionClose drains callbacks
-    // synchronously, so once `connection_` is destroyed the callbacks can no
-    // longer fire — making it safe for the trailing members to die next.
+    // Members the msquic callbacks may touch (state_*, handler_) must outlive
+    // `connection_`. ConnectionClose drains callbacks synchronously, so once
+    // `connection_` is destroyed the callbacks can no longer fire — making it
+    // safe for the trailing members to die next.
     QuicConfig                  cfg_;
     bool                        api_held_{false};
 
@@ -485,9 +664,6 @@ private:
     bool                        handshake_done_{false};
     bool                        handshake_ok_{false};
     QuicClient::InboundHandler  handler_;
-
-    std::mutex                                                  streams_mu_;
-    std::unordered_map<StreamCtx*, std::shared_ptr<StreamCtx>>  live_streams_;
 
     detail::UniqueHandle        registration_;
     detail::UniqueHandle        configuration_;

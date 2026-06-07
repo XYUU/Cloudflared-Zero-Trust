@@ -2,18 +2,9 @@
 //
 // tunnelrpc client. Opens a Cap'n Proto RPC session over a single bidirectional
 // QUIC stream and calls RegistrationServer.registerConnection.
-//
-// Memory model:
-//   - capnp::MessageBuilder owns its arena; we hold it by value inside the
-//     RegistrationRequest, so request bytes are freed when the request goes
-//     out of scope.
-//   - Serialized wire bytes are returned in a std::vector<std::uint8_t>; the
-//     QUIC stream owns them only for the duration of the StreamSend, then the
-//     SEND_COMPLETE callback drops them.
 #pragma once
 #include <array>
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -41,14 +32,6 @@ struct RegisterResponse {
     std::int64_t                      retry_after_seconds{0};
     bool                              should_retry{false};
 };
-
-// Encode a RegisterRequest as a Cap'n Proto message ready for stream send.
-// Stub-mode (no capnp at compile time) returns an empty buffer.
-std::vector<std::uint8_t> encode_register_request(const RegisterRequest& req);
-
-// Decode a wire response. Returns std::nullopt on parse error.
-std::optional<RegisterResponse> decode_register_response(
-    const std::uint8_t* data, std::size_t len) noexcept;
 
 // Decode "<UUID-string>" into 16 raw bytes. Returns false on bad format.
 bool parse_uuid(const std::string& s, std::array<std::uint8_t, 16>& out) noexcept;
