@@ -5,6 +5,7 @@
 #include "cfd/cidr.hpp"
 #include "cfd/lpm_trie.hpp"
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <string_view>
 
