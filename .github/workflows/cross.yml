@@ -32,17 +32,39 @@ jobs:
             prefix: arm-linux-gnueabihf-
             toolchain: cmake/toolchains/arm-openwrt-musl.cmake
           - target: arm-eabi5
-            apt:    gcc-arm-linux-gnueabi g++-arm-linux-gnueabi
-            prefix: arm-linux-gnueabi-
+            apt:    ''
+            musl_url: https://musl.cc/arm-linux-musleabi-cross.tgz
+            prefix: arm-linux-musleabi-
             toolchain: cmake/toolchains/arm-eabi5-openwrt-musl.cmake
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: install cross toolchain
+      - name: install base build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build cmake ${{ matrix.apt }}
+          sudo apt-get install -y ninja-build cmake
+          if [ -n "${{ matrix.apt }}" ]; then
+            sudo apt-get install -y ${{ matrix.apt }}
+          fi
+
+      - name: cache musl cross toolchain
+        if: matrix.musl_url != ''
+        id: musl-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/cross
+          key: musl-${{ matrix.target }}-${{ hashFiles('.github/workflows/cross.yml') }}
+
+      - name: fetch musl cross toolchain
+        if: matrix.musl_url != '' && steps.musl-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo mkdir -p /opt/cross
+          curl -fsSL "${{ matrix.musl_url }}" | sudo tar -xz -C /opt/cross --strip-components=1
+
+      - name: export musl toolchain to PATH
+        if: matrix.musl_url != ''
+        run: echo "/opt/cross/bin" >> "$GITHUB_PATH"
 
       - name: configure
         run: |
@@ -50,8 +72,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }} \
             -DCFD_TOOLCHAIN_PREFIX=${{ matrix.prefix }} \
             -DCFD_BUILD_TESTS=OFF \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc"
+            -DCMAKE_BUILD_TYPE=Release
 
       - name: build (cfd binary only; QUIC stubbed)
         run: cmake --build build-${{ matrix.target }} --target cfd -j

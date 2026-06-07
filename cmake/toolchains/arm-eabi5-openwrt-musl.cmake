@@ -3,7 +3,7 @@ set(CMAKE_SYSTEM_NAME      Linux)
 set(CMAKE_SYSTEM_PROCESSOR arm)
 
 if(NOT CFD_TOOLCHAIN_PREFIX)
-    set(CFD_TOOLCHAIN_PREFIX "arm-openwrt-linux-musl-")
+    set(CFD_TOOLCHAIN_PREFIX "arm-linux-musleabi-")
 endif()
 
 set(CMAKE_C_COMPILER   ${CFD_TOOLCHAIN_PREFIX}gcc)
@@ -25,5 +25,5 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 add_compile_options(-Os -ffunction-sections -fdata-sections
                     -march=armv5te -mfloat-abi=soft
                     -fno-exceptions -fno-rtti -fno-strict-aliasing)
-# Force static linking of libgcc and libstdc++ to avoid GLIBC version conflicts
-add_link_options(-Wl,--gc-sections -Wl,--as-needed -s -static-libgcc -static-libstdc++)
+# Fully static musl link: zero libc version dependency on target (e.g. Buildroot GLIBC 2.26)
+add_link_options(-static -Wl,--gc-sections -Wl,--as-needed -s)
