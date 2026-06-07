@@ -13,6 +13,7 @@
 # process down cleanly on reboot. We do NOT background cfd ourselves --
 # procd's `setpid` handles that.
 
+# shellcheck disable=SC2034
 START=99
 USE_PROCD=1
 
@@ -21,6 +22,7 @@ PROG=/usr/sbin/cfd
 start_service() {
     config_load 'cfd'
 
+    # shellcheck disable=SC3043
     local enabled config verbose
     config_get_bool enabled main enabled 1
     config_get      config  main config  '/etc/cfd.ini'

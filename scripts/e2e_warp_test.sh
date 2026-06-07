@@ -80,10 +80,10 @@ cfd --config "$WORKDIR/cfd.ini" --verbose > "$WORKDIR/cfd.log" 2>&1 &
 CFD_PID=$!
 
 # Wait for the "registered at edge" line, up to 20 seconds.
-for i in $(seq 1 40); do
+for _ in $(seq 1 40); do
     if grep -q "registered at edge" "$WORKDIR/cfd.log"; then break; fi
     sleep 0.5
-    kill -0 "$CFD_PID" 2>/dev/null || fail "cfd died: $(tail -n 30 $WORKDIR/cfd.log)"
+    kill -0 "$CFD_PID" 2>/dev/null || fail "cfd died: $(tail -n 30 "$WORKDIR"/cfd.log)"
 done
 grep -q "registered at edge" "$WORKDIR/cfd.log" || fail "registration timeout"
 

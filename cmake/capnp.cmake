@@ -42,7 +42,7 @@ function(cfd_capnp_generate OUT_SRCS_VAR)
             OUTPUT  ${out_cxx} ${out_h}
             COMMAND capnp compile
                     --src-prefix=${CMAKE_SOURCE_DIR}/proto
-                    -o${CAPNPC_CXX_EXECUTABLE:capnpc-c++}:${CMAKE_CURRENT_BINARY_DIR}
+                    -ocapnpc-c++:${CMAKE_CURRENT_BINARY_DIR}
                     ${schema}
             DEPENDS ${schema}
             COMMENT "capnp: ${stem}"
