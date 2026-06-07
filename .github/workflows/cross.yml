@@ -31,6 +31,10 @@ jobs:
             apt:    gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
             prefix: arm-linux-gnueabihf-
             toolchain: cmake/toolchains/arm-openwrt-musl.cmake
+          - target: arm-eabi5
+            apt:    gcc-arm-linux-gnueabi g++-arm-linux-gnueabi
+            prefix: arm-linux-gnueabi-
+            toolchain: cmake/toolchains/arm-eabi5-openwrt-musl.cmake
 
     steps:
       - uses: actions/checkout@v4
