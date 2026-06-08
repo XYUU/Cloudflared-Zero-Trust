@@ -71,12 +71,16 @@ else()
     endif()
 endif()
 
-# MIPS32 has no native 64-bit atomic instructions; GCC emits __atomic_load_8 /
-# __atomic_store_8 calls from capnproto's layout code, satisfied by libatomic.
-# Must be a PUBLIC dep of cfd_core (not a direct dep of the executables) so that
-# it appears AFTER libcapnp.a in the link order — required because --as-needed
-# discards a library if no unresolved symbols exist when it is first encountered.
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "mips64")
+# 32-bit ARM and MIPS lack native 64-bit atomic instructions; GCC emits calls to
+# __atomic_load_8 / __atomic_store_8 / __atomic_fetch_{add,sub}_8 etc., which
+# live in libatomic.  msquic (shared) and capnproto (static) both produce such
+# references on these architectures.
+#
+# Must be a PUBLIC dep of cfd_core so it appears AFTER libcapnp.a in the link
+# order: --as-needed discards a library if no unresolved symbols exist at the
+# point it is encountered, so ordering relative to the archives that need it matters.
+if((CMAKE_SYSTEM_PROCESSOR MATCHES "^arm"  AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64") OR
+   (CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES  "mips64"))
     target_link_libraries(cfd_core PUBLIC atomic)
 endif()
 

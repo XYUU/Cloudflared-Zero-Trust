@@ -20,6 +20,12 @@ if(CMAKE_CROSSCOMPILING)
     message(STATUS "Cross compiling for ${CMAKE_SYSTEM_PROCESSOR} (${CMAKE_SYSTEM_NAME})")
     set(CFD_ENABLE_ASAN  OFF CACHE BOOL "" FORCE)
     set(CFD_ENABLE_UBSAN OFF CACHE BOOL "" FORCE)
+    # Use $ORIGIN so the deployed binary finds libmsquic.so.2 in the same directory.
+    # cmake's default BUILD_RPATH points to the build tree, which doesn't exist on
+    # the embedded target; BUILD_WITH_INSTALL_RPATH makes the built binary already
+    # carry the deployment RPATH (no separate install step needed).
+    set(CMAKE_INSTALL_RPATH "$ORIGIN")
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 endif()
 
 # --- Compiler hardening -----------------------------------------------------

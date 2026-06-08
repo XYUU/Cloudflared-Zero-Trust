@@ -91,7 +91,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release
 
       - name: build
-        run: cmake --build build-${{ matrix.target }} --target cfd -j
+        run: cmake --build build-${{ matrix.target }} --target cfd cfd_probe -j
 
       - name: size report
         run: |
@@ -99,8 +99,20 @@ jobs:
           PREFIX="${{ matrix.prefix }}"
           ${PREFIX}size build-${{ matrix.target }}/src/cfd || true
 
+      - name: package
+        run: |
+          DIST=dist-${{ matrix.target }}
+          BUILD=build-${{ matrix.target }}
+          mkdir -p "${DIST}"
+          cp "${BUILD}/src/cfd" "${BUILD}/src/cfd_probe" "${DIST}/"
+          # libmsquic.so.2.4.5: deploy alongside the binary so the $ORIGIN RPATH resolves.
+          SO="${BUILD}/_deps/msquic-build/bin/Release/libmsquic.so.2.4.5"
+          if [ -f "${SO}" ]; then
+            cp "${SO}" "${DIST}/"
+          fi
+
       - name: upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: cfd-${{ matrix.target }}-${{ github.sha }}
-          path: build-${{ matrix.target }}/src/cfd
+          path: dist-${{ matrix.target }}/

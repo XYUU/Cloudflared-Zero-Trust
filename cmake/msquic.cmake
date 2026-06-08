@@ -31,6 +31,18 @@ set_property(DIRECTORY PROPERTY COMPILE_OPTIONS "")
 get_directory_property(_cfd_saved_link_opts LINK_OPTIONS)
 set_property(DIRECTORY PROPERTY LINK_OPTIONS "")
 
+# On 32-bit ARM and MIPS, GCC emits __sync_*_8 / __atomic_*_8 calls for 8-byte
+# atomic ops (no native hardware instruction).  These must be resolved inside
+# libmsquic.so itself at build time; if left undefined in the .so, the final
+# executable link fails because ld checks all referenced symbols are satisfiable.
+# Force-include the static libatomic so the implementations are embedded in the
+# .so and no runtime dependency on libatomic.so.1 is added.
+if((CMAKE_SYSTEM_PROCESSOR MATCHES "^arm"  AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64") OR
+   (CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES  "mips64"))
+    set_property(DIRECTORY APPEND PROPERTY LINK_OPTIONS
+        "-Wl,-Bstatic" "-latomic" "-Wl,-Bdynamic")
+endif()
+
 # Also save/patch CMAKE_<LANG>_FLAGS for the small set of msquic-internal
 # warnings that are legitimately present in its C code.
 set(CMAKE_C_FLAGS_SAVED   "${CMAKE_C_FLAGS}")
