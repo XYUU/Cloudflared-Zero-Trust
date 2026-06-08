@@ -79,9 +79,14 @@ endif()
 # Must be a PUBLIC dep of cfd_core so it appears AFTER libcapnp.a in the link
 # order: --as-needed discards a library if no unresolved symbols exist at the
 # point it is encountered, so ordering relative to the archives that need it matters.
-if((CMAKE_SYSTEM_PROCESSOR MATCHES "^arm"  AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64") OR
-   (CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES  "mips64"))
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm" AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+    # ARM: link dynamic libatomic (available from the system or toolchain runtime).
     target_link_libraries(cfd_core PUBLIC atomic)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "mips64")
+    # MIPS: embed libatomic.a statically into the executable so there is no
+    # runtime dependency on glibc's libatomic.so.1 (incompatible with musl targets).
+    # Executables are non-PIC so the non-PIC libatomic.a is accepted here.
+    target_link_libraries(cfd_core PUBLIC "-Wl,-Bstatic" "-latomic" "-Wl,-Bdynamic")
 endif()
 
 add_executable(cfd main.cpp)

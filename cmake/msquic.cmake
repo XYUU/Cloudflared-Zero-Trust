@@ -71,17 +71,24 @@ FetchContent_MakeAvailable(msquic)
 
 # On 32-bit ARM and MIPS, GCC emits __sync_*_8 / __atomic_*_8 calls for 8-byte
 # atomic ops (no native hardware instruction).  These must be resolved inside
-# libmsquic.so itself; if left undefined the executable link fails because ld
-# verifies all .so-internal symbol references are satisfiable.
+# libmsquic.so itself at build time; undefined 8-byte atomic refs in the .so
+# cause a hard linker error when linking the final executable.
 #
-# set_property(DIRECTORY LINK_OPTIONS) before FetchContent does NOT propagate
-# reliably into msquic's own subdirectory scope — use target_link_options on
-# the exported target instead (applied AFTER MakeAvailable creates the target).
-# -Wl,-Bstatic/-Bdynamic embeds the static libatomic.a inside the .so so there
-# is no runtime dependency on libatomic.so.1.
-if((CMAKE_SYSTEM_PROCESSOR MATCHES "^arm"  AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64") OR
-   (CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES  "mips64"))
+# ARM: libatomic.a from the ARM cross-toolchain (Bootlin musl / Ubuntu
+#      arm-linux-gnueabihf) is compiled with -fPIC, so it can be embedded
+#      directly via -Wl,-Bstatic -latomic -Wl,-Bdynamic.
+#
+# MIPS: Ubuntu's mipsel-linux-gnu libatomic.a is NOT compiled with -fPIC.
+#       Embedding it into a .so fails with R_MIPS_HI16 relocation errors.
+#       Instead, a tiny hand-written PIC implementation (stubs/atomic_mips32.c)
+#       is added as a source file to the msquic target; it uses a compiler-
+#       generated LL/SC spinlock on a 32-bit word (inline on MIPS II+, all
+#       modern Linux MIPS targets) so there is no recursive libatomic call.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm" AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
     target_link_libraries(msquic PRIVATE "-Wl,-Bstatic" "-latomic" "-Wl,-Bdynamic")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "mips64")
+    target_sources(msquic PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/stubs/atomic_mips32.c)
 endif()
 
 # Restore everything so subsequent targets see the full project flags.
