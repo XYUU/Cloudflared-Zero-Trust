@@ -106,11 +106,13 @@ int main(int argc, char** argv) {
 
     // --- QUIC tunnel ---
     cfd::tunnel::QuicConfig qcfg;
-    qcfg.edge_host  = cfg.edge_host;
-    qcfg.edge_port  = cfg.edge_port;
-    qcfg.tunnel_id  = cfg.tunnel_id;
-    qcfg.account_tag = cfg.account_tag;
-    // base64 decode of tunnel_secret_b64 elided in skeleton.
+    qcfg.edge_host        = cfg.edge_host;
+    qcfg.edge_port        = cfg.edge_port;
+    qcfg.tunnel_id        = cfg.tunnel_id;
+    qcfg.account_tag      = cfg.account_tag;
+    qcfg.ca_bundle_path   = cfg.ca_bundle_path;
+    qcfg.client_cert_path = cfg.client_cert_path;
+    qcfg.client_key_path  = cfg.client_key_path;
     auto qc = std::make_shared<cfd::tunnel::QuicClient>(std::move(qcfg));
     if (auto ec = qc->connect(); ec) {
         LOG_WARN("QUIC connect: %s (continuing in degraded mode)", ec.message().c_str());

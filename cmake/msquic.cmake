@@ -7,6 +7,17 @@
 
 include(FetchContent)
 
+# msquic v2.4.x has many pedantic/conversion/sign-conversion warnings that
+# become errors under GCC's strict mode. Suppress them for the subproject.
+set(CMAKE_C_FLAGS_SAVED   "${CMAKE_C_FLAGS}")
+set(CMAKE_CXX_FLAGS_SAVED "${CMAKE_CXX_FLAGS}")
+string(APPEND CMAKE_C_FLAGS
+    " -Wno-pedantic -Wno-conversion -Wno-sign-conversion -Wno-free-labels"
+    " -Wno-error=pedantic -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=free-labels")
+string(APPEND CMAKE_CXX_FLAGS
+    " -Wno-pedantic -Wno-conversion -Wno-sign-conversion -Wno-free-labels"
+    " -Wno-error=pedantic -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=free-labels")
+
 set(MSQUIC_TAG "v2.4.5" CACHE STRING "msquic git tag")
 set(QUIC_BUILD_TOOLS  OFF CACHE BOOL "" FORCE)
 set(QUIC_BUILD_TEST   OFF CACHE BOOL "" FORCE)
@@ -22,6 +33,10 @@ FetchContent_Declare(msquic
     GIT_SUBMODULES_RECURSE TRUE
 )
 FetchContent_MakeAvailable(msquic)
+
+# Restore flags so the rest of the project isn't affected.
+set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS_SAVED}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_SAVED}")
 
 # msquic exports the `msquic` target.
 set(MSQUIC_TARGET msquic CACHE INTERNAL "")

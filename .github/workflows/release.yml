@@ -45,6 +45,8 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }} \
             -DCFD_TOOLCHAIN_PREFIX=${{ matrix.prefix }} \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCFD_FETCH_MSQUIC=ON \
+            -DCFD_FETCH_CAPNP=ON \
             -DCFD_BUILD_TESTS=OFF \
             -DCFD_STRIP_BINARY=ON
 

@@ -47,7 +47,9 @@ jobs:
       - name: install base build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build cmake
+          # capnproto: host-side code generator (capnp compile runs on the host
+          # even when cross-compiling; target libs come from CFD_FETCH_CAPNP).
+          sudo apt-get install -y ninja-build cmake capnproto
           if [ -n "${{ matrix.apt }}" ]; then
             sudo apt-get install -y ${{ matrix.apt }}
           fi
@@ -82,9 +84,11 @@ jobs:
           cmake -B build-${{ matrix.target }} -G Ninja \
             $EXTRA \
             -DCFD_BUILD_TESTS=OFF \
+            -DCFD_FETCH_MSQUIC=ON \
+            -DCFD_FETCH_CAPNP=ON \
             -DCMAKE_BUILD_TYPE=Release
 
-      - name: build (cfd binary only; QUIC stubbed)
+      - name: build
         run: cmake --build build-${{ matrix.target }} --target cfd -j
 
       - name: size report

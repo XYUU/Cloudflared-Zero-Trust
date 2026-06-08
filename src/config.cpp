@@ -61,7 +61,10 @@ bool Config::load_from_file(const std::string& path, Config& out, std::string& e
             auto c = net::Cidr::parse(v);
             if (!c) { err = "bad route: " + v; return false; }
             out.routed_cidrs.push_back(*c);
-        } else {
+        } else if (k == "ca_bundle_path")     out.ca_bundle_path = v;
+          else if (k == "client_cert_path")   out.client_cert_path = v;
+          else if (k == "client_key_path")    out.client_key_path = v;
+        else {
             err = "unknown key: " + k;
             return false;
         }

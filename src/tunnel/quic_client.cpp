@@ -25,19 +25,41 @@
 //     must never be copied or moved (KJ_DISALLOW_COPY_AND_MOVE).
 
 #include "cfd/quic_client.hpp"
+#include "cfd/cloudflare_ca.hpp"
 #include "cfd/frame.hpp"
 #include "cfd/log.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <deque>
+#include <fcntl.h>
 #include <memory>
 #include <mutex>
+#include <netdb.h>
+#include <string>
+#include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
+
+#ifdef __linux__
+// memfd_create: anonymous in-memory file, accessible via /proc/self/fd/<n>.
+// Available since Linux 3.17 / glibc 2.27 / musl 1.2.
+// SYS_memfd_create is always in <sys/syscall.h> for supported arches.
+#  include <sys/syscall.h>
+#  ifndef MFD_CLOEXEC
+#    define MFD_CLOEXEC 1U
+#  endif
+// Use the syscall directly to avoid header variations between glibc/musl.
+static int cfd_memfd_create(const char* name) noexcept {
+    return static_cast<int>(::syscall(SYS_memfd_create, name,
+                                      static_cast<unsigned>(MFD_CLOEXEC)));
+}
+#endif
 
 #ifdef CFD_HAVE_MSQUIC
 #  include "cfd/msquic_raii.hpp"
@@ -81,6 +103,44 @@ void api_table_release() noexcept {
 }  // namespace detail
 
 namespace {
+
+// Returns the path to the embedded Cloudflare Origin CA PEM.
+//
+// On Linux we use memfd_create to back the content with anonymous memory; the
+// file descriptor is kept open for the process lifetime so /proc/self/fd/<n>
+// stays valid.  On other platforms we fall back to a fixed-path temp file
+// (content is a compile-time constant so the fixed name is safe).
+// The underlying fd / file is created exactly once per process (Meyer's singleton).
+const char* embedded_ca_path() noexcept {
+    struct MemCa {
+        int  fd{-1};
+        char path[48]{};
+
+        MemCa() noexcept {
+#ifdef __linux__
+            fd = cfd_memfd_create("cfd_ca");
+            if (fd >= 0) {
+                ::write(fd, kCloudflareCAPem.data(),
+                        static_cast<ssize_t>(kCloudflareCAPem.size()));
+                std::snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+                return;
+            }
+#endif
+            // Fallback: fixed-path file (content is constant → fixed name OK).
+            static constexpr char kFallback[] = "/tmp/cfd_cf_ca.pem";
+            int tfd = ::open(kFallback, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+            if (tfd >= 0) {
+                ::write(tfd, kCloudflareCAPem.data(),
+                        static_cast<ssize_t>(kCloudflareCAPem.size()));
+                ::close(tfd);
+                std::memcpy(path, kFallback, sizeof(kFallback));
+            }
+        }
+        ~MemCa() noexcept { if (fd >= 0) ::close(fd); }
+    };
+    static MemCa inst;
+    return inst.path[0] ? inst.path : nullptr;
+}
 
 // Per-send context for QUIC datagrams owned across the msquic C boundary.
 // We unique_ptr::release() into the DatagramSend call, then reclaim in the
@@ -128,7 +188,7 @@ public:
 
     KJ_DISALLOW_COPY_AND_MOVE(MsquicAsyncStream);
 
-    ~MsquicAsyncStream() noexcept override {
+    ~MsquicAsyncStream() noexcept {
         // UniqueHandle dtor calls StreamClose, which drains all pending callbacks.
     }
 
@@ -359,10 +419,8 @@ public:
         settings.IsSet.HandshakeIdleTimeoutMs    = TRUE;
         settings.KeepAliveIntervalMs             = kKeepAliveMs;
         settings.IsSet.KeepAliveIntervalMs       = TRUE;
-        settings.DatagramReceiveEnabled          = TRUE;
-        settings.IsSet.DatagramReceiveEnabled    = TRUE;
-        settings.PeerUnidiStreamCount            = 3;
-        settings.IsSet.PeerUnidiStreamCount      = TRUE;
+        settings.PeerBidiStreamCount             = 16;
+        settings.IsSet.PeerBidiStreamCount       = TRUE;
 
         raw = nullptr;
         if (QUIC_FAILED(detail::g_msquic->ConfigurationOpen(
@@ -372,38 +430,56 @@ public:
         configuration_ = detail::wrap(raw, detail::HandleKind::Configuration);
 
         // TLS policy:
-        //   ca_bundle_path == "INSECURE"  -> explicit opt-in to skip validation
-        //                                    (only for hand debugging; logged loud)
-        //   ca_bundle_path empty          -> use the platform's system trust store
-        //   otherwise                     -> use the file as the trust anchor
-        //                                    (not yet wired through msquic creds —
-        //                                     fall back to system store + a warn)
+        //   ca_bundle_path == "INSECURE"  -> skip validation (debug only)
+        //   ca_bundle_path non-empty      -> use that file as the only trust anchor
+        //   ca_bundle_path empty (default)-> use embedded Cloudflare Origin CA
+        //
+        // The edge (region*.argotunnel.com:7844) presents a cert signed by
+        // "CloudFlare Origin SSL ECC Certificate Authority", which is NOT in
+        // public root CA stores. msquic's embedded OpenSSL also looks in
+        // /usr/local/ssl (not the system store). We handle both problems by
+        // writing the embedded Cloudflare CA to a temp file and loading it
+        // explicitly via SET_CA_CERTIFICATE_FILE.
         QUIC_CREDENTIAL_CONFIG cred{};
-        cred.Type  = QUIC_CREDENTIAL_TYPE_NONE;
-        cred.Flags = QUIC_CREDENTIAL_FLAG_CLIENT;
+        cred.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
+            QUIC_CREDENTIAL_FLAG_CLIENT |
+            QUIC_CREDENTIAL_FLAG_USE_TLS_BUILTIN_CERTIFICATE_VALIDATION);
 
-        // CA file kept alive past the LoadCredential call via this local; msquic
-        // copies into its own internal state before returning.
-        QUIC_CERTIFICATE_FILE ca_file{};
+        // cert_file kept alive past LoadCredential; msquic copies internally.
+        QUIC_CERTIFICATE_FILE cert_file{};
+        if (!cfg_.client_cert_path.empty() && !cfg_.client_key_path.empty()) {
+            cert_file.CertificateFile = cfg_.client_cert_path.c_str();
+            cert_file.PrivateKeyFile  = cfg_.client_key_path.c_str();
+            cred.Type                 = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
+            cred.CertificateFile      = &cert_file;
+            LOG_INFO("mTLS client cert: %s", cfg_.client_cert_path.c_str());
+        } else {
+            cred.Type = QUIC_CREDENTIAL_TYPE_NONE;
+        }
+
         if (cfg_.ca_bundle_path == "INSECURE") {
             LOG_WARN("TLS validation DISABLED (ca_bundle_path=INSECURE). "
                      "Never use this against a real edge.");
             cred.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
                 cred.Flags | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION);
-        } else if (!cfg_.ca_bundle_path.empty()) {
-#ifdef QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE
-            // msquic >= 2.4 with OpenSSL backend honors this on top of any
-            // credential type.
-            ca_file.PrivateKeyFile  = nullptr;
-            ca_file.CertificateFile = cfg_.ca_bundle_path.c_str();
-            cred.CaCertificateFile  = cfg_.ca_bundle_path.c_str();
-            cred.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
-                cred.Flags | QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE);
-#else
-            LOG_WARN("msquic build lacks SET_CA_CERTIFICATE_FILE; "
-                     "falling back to system trust store");
-            (void)ca_file;
-#endif
+        } else {
+            // Prefer an explicit user-supplied bundle; otherwise use the
+            // embedded Cloudflare Origin CA backed by an in-memory file
+            // (memfd on Linux) that is created once per process.
+            const char* ca_path = cfg_.ca_bundle_path.empty()
+                                  ? embedded_ca_path()
+                                  : cfg_.ca_bundle_path.c_str();
+            if (ca_path) {
+                if (cfg_.ca_bundle_path.empty())
+                    LOG_INFO("Using embedded Cloudflare Origin CA (in-memory)");
+                else
+                    LOG_INFO("Using explicit CA bundle: %s", ca_path);
+                cred.CaCertificateFile = ca_path;
+                cred.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
+                    cred.Flags | QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE);
+            } else {
+                LOG_WARN("embedded_ca_path failed; TLS server validation may fail");
+            }
         }
         if (QUIC_FAILED(detail::g_msquic->ConfigurationLoadCredential(
                 configuration_.get(), &cred)))
@@ -419,13 +495,58 @@ public:
             return std::make_error_code(std::errc::protocol_error);
         connection_ = detail::wrap(raw, detail::HandleKind::Connection);
 
-        if (QUIC_FAILED(detail::g_msquic->ConnectionStart(
+        {
+            // msquic's ConnectionStart uses its ServerName argument as both the DNS
+            // hostname and the TLS SNI. cloudflared always sends SNI "quic.cftunnel.com"
+            // while connecting to a regional edge IP (region1.argotunnel.com).
+            // To split these two roles we pre-resolve the edge host, set the remote
+            // address via QUIC_PARAM_CONN_REMOTE_ADDRESS, then call ConnectionStart
+            // with the SNI-only name so msquic skips its own DNS lookup.
+            const char* sni = cfg_.server_name.empty()
+                              ? cfg_.edge_host.c_str()
+                              : cfg_.server_name.c_str();
+
+            // Resolve edge_host → set as the remote address so ConnectionStart uses
+            // `sni` purely for TLS SNI without re-resolving it.
+            {
+                addrinfo hints{};
+                hints.ai_family   = AF_UNSPEC;
+                hints.ai_socktype = SOCK_DGRAM;
+                addrinfo* res = nullptr;
+                const std::string port_str = std::to_string(cfg_.edge_port);
+                int rc = ::getaddrinfo(cfg_.edge_host.c_str(), port_str.c_str(), &hints, &res);
+                if (rc != 0 || res == nullptr) {
+                    LOG_ERROR("getaddrinfo(%s) failed: %s",
+                              cfg_.edge_host.c_str(), gai_strerror(rc));
+                    return std::make_error_code(std::errc::host_unreachable);
+                }
+                QUIC_ADDR remote{};
+                static_assert(sizeof(remote) >= sizeof(sockaddr_in6), "QUIC_ADDR too small");
+                std::memcpy(&remote, res->ai_addr, res->ai_addrlen);
+                ::freeaddrinfo(res);
+
+                // Overwrite the port inside QUIC_ADDR (getaddrinfo fills it from the
+                // service string but let's be explicit).
+                QuicAddrSetPort(&remote, cfg_.edge_port);
+
+                detail::g_msquic->SetParam(
+                    connection_.get(),
+                    QUIC_PARAM_CONN_REMOTE_ADDRESS,
+                    sizeof(remote), &remote);
+                LOG_INFO("Resolved %s → set as remote address, SNI=%s port=%u",
+                         cfg_.edge_host.c_str(), sni, cfg_.edge_port);
+            }
+
+            const QUIC_STATUS cs = detail::g_msquic->ConnectionStart(
                 connection_.get(),
                 configuration_.get(),
                 QUIC_ADDRESS_FAMILY_UNSPEC,
-                cfg_.edge_host.c_str(),
-                cfg_.edge_port))) {
-            return std::make_error_code(std::errc::connection_refused);
+                sni,
+                cfg_.edge_port);
+            LOG_INFO("ConnectionStart sni=%s returned 0x%x (FAILED=%d)",
+                     sni, cs, (int)QUIC_FAILED(cs));
+            if (QUIC_FAILED(cs))
+                return std::make_error_code(std::errc::connection_refused);
         }
 
         // Block on the handshake outcome — Spike mode keeps this synchronous.
@@ -462,22 +583,24 @@ public:
         kj::WaitScope waitScope(loop);
 
         KJ_IF_MAYBE(err, kj::runCatchingExceptions([&]() {
-            // stream owns the HQUIC; its dtor calls StreamClose synchronously.
+            // Declare stream and rpc FIRST so they are destroyed LAST (LIFO).
+            // The watchdog must stop before rpc/stream are torn down; placing
+            // done/watchdog/KJ_DEFER after rpc guarantees that order.
             auto stream = kj::heap<MsquicAsyncStream>(
                 detail::g_msquic, connection_.get());
+            capnp::TwoPartyClient rpc(*stream);
+            auto cap = rpc.bootstrap().castAs<RegistrationServer>();
 
-            // Watchdog: abort the stream if the call takes too long.
+            // Watchdog: declared AFTER rpc → destroyed BEFORE rpc (LIFO).
+            // This guarantees the watchdog thread stops before we touch rpc
+            // or stream during cleanup — avoiding the race where abort() fires
+            // concurrently with the LIFO destructors.
             std::atomic<bool> done{false};
             auto watchdog = std::thread([&] {
                 std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
-                if (!done.load(std::memory_order_relaxed)) stream->abort();
+                if (!done.load(std::memory_order_acquire)) stream->abort();
             });
-            // KJ_DEFER runs in LIFO order before stream is destroyed, so the
-            // watchdog is always joined before the stream handle disappears.
-            KJ_DEFER({ done.store(true, std::memory_order_relaxed); watchdog.join(); });
-
-            capnp::TwoPartyClient rpc(*stream);
-            auto cap = rpc.bootstrap().castAs<RegistrationServer>();
+            KJ_DEFER({ done.store(true, std::memory_order_release); watchdog.join(); });
 
             auto req_msg = cap.registerConnectionRequest();
 
@@ -510,7 +633,13 @@ public:
             }
 
             // Drive the KJ event loop until we get a response.
-            auto result = req_msg.send().wait(waitScope).getResult();
+            auto response = req_msg.send().wait(waitScope);
+
+            // Signal the watchdog immediately so it never calls abort() on a
+            // stream that is about to be destroyed.  KJ_DEFER will join() it.
+            done.store(true, std::memory_order_release);
+
+            auto result = response.getResult().getResult();
 
             if (result.isConnectionDetails()) {
                 auto d   = result.getConnectionDetails();
@@ -584,6 +713,20 @@ public:
     }
 
 private:
+    // Stream callback for peer-initiated streams we don't implement.
+    // msquic's official sample shows that PEER_STREAM_STARTED must ONLY set
+    // the callback handler and return — StreamClose must never be called from
+    // within a connection event.  We abort the stream here, and close the
+    // handle in the SHUTDOWN_COMPLETE branch below (called from the stream's
+    // own callback context, which is safe).
+    static QUIC_STATUS QUIC_API s_null_stream_cb(
+        HQUIC stream, void*, QUIC_STREAM_EVENT* ev) noexcept {
+        if (ev->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
+            detail::g_msquic->StreamClose(stream);
+        }
+        return QUIC_STATUS_SUCCESS;
+    }
+
     // --- Connection callback (msquic worker thread) ---
     static QUIC_STATUS QUIC_API s_conn_cb(
         HQUIC, void* ctx, QUIC_CONNECTION_EVENT* ev) noexcept {
@@ -602,12 +745,27 @@ private:
                 state_cv_.notify_all();
                 break;
             }
-            case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
-            case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+            case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT: {
+                LOG_WARN("QUIC shutdown by transport: status=0x%x error=0x%llx",
+                         ev.SHUTDOWN_INITIATED_BY_TRANSPORT.Status,
+                         (unsigned long long)ev.SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode);
+                std::lock_guard<std::mutex> lk(state_mu_);
+                handshake_done_ = true;
+                state_cv_.notify_all();
+                break;
+            }
+            case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER: {
+                LOG_WARN("QUIC shutdown by peer: error=0x%llx",
+                         (unsigned long long)ev.SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
+                std::lock_guard<std::mutex> lk(state_mu_);
+                handshake_done_ = true;
+                state_cv_.notify_all();
+                break;
+            }
             case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
                 {
                     std::lock_guard<std::mutex> lk(state_mu_);
-                    handshake_done_ = true;  // unblock connect() even on failure
+                    handshake_done_ = true;
                 }
                 state_cv_.notify_all();
                 break;
@@ -618,14 +776,15 @@ private:
                 break;
             }
             case QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED: {
-                // ClientContext is the SendCtx* we released above. Reclaim it
-                // on terminal states only — see msquic docs for which states
-                // mean "buffer is no longer referenced".
+                // msquic datagram send lifecycle (per msquic docs):
+                //   SENT      — buffer handed off to UDP; reclaim the buffer HERE.
+                //   CANCELED  — never sent (e.g. connection closed); reclaim HERE.
+                //   ACKNOWLEDGED / ACKNOWLEDGED_SPURIOUS / LOST_DISCARDED /
+                //   LOST_SUSPECT — informational; buffer ALREADY reclaimed at SENT.
+                //                  Do NOT touch ClientContext again → double free.
                 const auto state = ev.DATAGRAM_SEND_STATE_CHANGED.State;
                 if (state == QUIC_DATAGRAM_SEND_SENT ||
-                    state == QUIC_DATAGRAM_SEND_LOST_DISCARDED ||
-                    state == QUIC_DATAGRAM_SEND_CANCELED ||
-                    state == QUIC_DATAGRAM_SEND_ACKNOWLEDGED) {
+                    state == QUIC_DATAGRAM_SEND_CANCELED) {
                     std::unique_ptr<SendCtx> ctx(
                         static_cast<SendCtx*>(
                             ev.DATAGRAM_SEND_STATE_CHANGED.ClientContext));
@@ -633,7 +792,33 @@ private:
                 }
                 break;
             }
-            default: break;
+            case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
+                // msquic official pattern: in PEER_STREAM_STARTED, ONLY set
+                // the stream callback and return.  StreamClose must be called
+                // from within the stream callback (on SHUTDOWN_COMPLETE), not
+                // here — calling it from a connection event causes reentrancy
+                // issues that manifest as segfaults or heap corruption.
+                HQUIC s = ev.PEER_STREAM_STARTED.Stream;
+                detail::g_msquic->SetCallbackHandler(
+                    s,
+                    reinterpret_cast<void*>(&QuicClientImpl::s_null_stream_cb),
+                    nullptr);
+                // Abort the stream; s_null_stream_cb calls StreamClose on
+                // SHUTDOWN_COMPLETE.
+                detail::g_msquic->StreamShutdown(
+                    s, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, QUIC_STATUS_ABORTED);
+                LOG_DEBUG("peer stream aborted (not implemented)");
+                break;
+            }
+            case QUIC_CONNECTION_EVENT_STREAMS_AVAILABLE:
+            case QUIC_CONNECTION_EVENT_PEER_NEEDS_STREAMS:
+            case QUIC_CONNECTION_EVENT_IDEAL_PROCESSOR_CHANGED:
+            case QUIC_CONNECTION_EVENT_DATAGRAM_STATE_CHANGED:
+            case QUIC_CONNECTION_EVENT_RESUMPTION_TICKET_RECEIVED:
+                break;  // benign/expected events, no action needed
+            default:
+                LOG_WARN("QUIC conn unhandled event: type=%u", (unsigned)ev.Type);
+                break;
         }
         return QUIC_STATUS_SUCCESS;
     }

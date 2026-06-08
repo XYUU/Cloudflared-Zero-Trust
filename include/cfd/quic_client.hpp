@@ -9,13 +9,16 @@
 namespace cfd::tunnel {
 
 struct QuicConfig {
-    std::string edge_host;       // e.g. "region1.argotunnel.com"
+    std::string edge_host;                      // DNS/IP to connect to, e.g. "region1.argotunnel.com"
     std::uint16_t edge_port{7844};
+    std::string server_name{"quic.cftunnel.com"}; // TLS SNI — cloudflared always uses this, NOT edge_host
     std::string alpn{"argotunnel"};
     std::string tunnel_id;       // UUID from credentials.json
     std::string account_tag;
     std::vector<std::uint8_t> tunnel_secret;   // base64-decoded secret
-    std::string ca_bundle_path;  // optional, for pinning
+    std::string ca_bundle_path;      // optional; "INSECURE" to skip validation
+    std::string client_cert_path;    // PEM cert for mTLS (not needed for Named Tunnels)
+    std::string client_key_path;     // PEM private key for mTLS
 };
 
 // Forward decl of the impl so the header doesn't drag in msquic.

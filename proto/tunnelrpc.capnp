@@ -1,60 +1,62 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Subset of cloudflared's tunnelrpc schema needed to register a connection.
-# Source of truth: github.com/cloudflare/cloudflared/tunnelrpc/proto/*.capnp
+# Source of truth: github.com/cloudflare/cloudflared/tunnelrpc/proto/tunnelrpc.capnp
 #
-# We keep only the messages we *send* (RegisterConnection / Unregister) and
-# *receive* (the result wrapper), so changes upstream to unrelated messages
-# do not force us to re-vendor.
+# ALL IDs must exactly match the upstream schema — capnp uses the 64-bit type ID
+# to identify interfaces and structs on the wire.  A mismatch causes
+# "method not implemented" or silent mis-decoding of union fields.
 
-@0xc082ef6e0d42ed1d;
+@0xdb8274f9144abc7e;
 
-struct ConnectionOptions {
-    client            @0 :ClientInfo;
-    originLocalIp     @1 :Data;
-    replaceExisting   @2 :Bool;
-    compressionQuality @3 :UInt8;
+struct ClientInfo @0x83ced0145b2f114b {
+    clientId  @0 :Data;         # 16-byte UUID (raw bytes)
+    features  @1 :List(Text);
+    version   @2 :Text;         # e.g. "cfd-cpp/0.1.0"
+    arch      @3 :Text;         # e.g. "linux_mipsel"
+}
+
+struct ConnectionOptions @0xb4bf9861fe035d04 {
+    client              @0 :ClientInfo;
+    originLocalIp       @1 :Data;
+    replaceExisting     @2 :Bool;
+    compressionQuality  @3 :UInt8;
     numPreviousAttempts @4 :UInt8;
 }
 
-struct ClientInfo {
-    clientId  @0 :Data;     # 16-byte UUID
-    features  @1 :List(Text);
-    version   @2 :Text;     # e.g. "cfd-cpp/0.1.0"
-    arch      @3 :Text;     # e.g. "linux_mipsel"
+struct ConnectionDetails @0xb5f39f082b9ac18a {
+    uuid                       @0 :Data;
+    locationName               @1 :Text;
+    tunnelIsRemotelyManaged    @2 :Bool;
 }
 
-struct ConnectionDetails {
-    uuid           @0 :Data;
-    locationName   @1 :Text;
-    tunnelIsRemotelyConfigured @2 :Bool;
-}
-
-struct ConnectionError {
+struct ConnectionError @0xf5f383d2785edb86 {
     cause       @0 :Text;
     retryAfter  @1 :Int64;
     shouldRetry @2 :Bool;
 }
 
-struct ConnectionResponse {
+struct ConnectionResponse @0xdbaa9d03d52b62dc {
     result :union {
-        connectionDetails @0 :ConnectionDetails;
-        error             @1 :ConnectionError;
+        error             @0 :ConnectionError;
+        connectionDetails @1 :ConnectionDetails;
     }
 }
 
-interface RegistrationServer {
-    registerConnection @0 (
-        auth        :TunnelAuth,
-        tunnelId    :Data,
-        connIndex   :UInt8,
-        options     :ConnectionOptions,
-    ) -> (result :ConnectionResponse);
-
-    unregisterConnection @1 ();
-}
-
-struct TunnelAuth {
+struct TunnelAuth @0x9496331ab9cd463f {
     accountTag   @0 :Text;
     tunnelSecret @1 :Data;     # raw bytes of the base64-decoded secret
+}
+
+interface RegistrationServer @0xf71695ec7fe85497 {
+    registerConnection @0 (
+        auth      :TunnelAuth,
+        tunnelId  :Data,
+        connIndex :UInt8,
+        options   :ConnectionOptions,
+    ) -> (result :ConnectionResponse);
+
+    unregisterConnection @1 () -> ();
+
+    updateLocalConfiguration @2 (config :Data) -> ();
 }
