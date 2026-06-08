@@ -5,7 +5,7 @@
 
 include(FetchContent)
 
-# ---- Isolate msquic from project-wide warning flags --------------------------
+# ---- Isolate msquic from project-wide warning and sanitizer flags ------------
 #
 # cmake processes flags in two places:
 #   1. CMAKE_<LANG>_FLAGS  — set by set()/string(APPEND ...)
@@ -16,10 +16,20 @@ include(FetchContent)
 # the -Wno-sign-conversion we'd put in CMAKE_C_FLAGS — making msquic's own
 # -Werror fatal on its C sources.
 #
-# Fix: save and clear the directory COMPILE_OPTIONS before FetchContent so
-# msquic's subdirectory inherits an empty set.  Restore for our own targets.
+# LINK_OPTIONS (from add_link_options) must also be cleared: when
+# CFD_ENABLE_ASAN=ON, -fsanitize=address is in LINK_OPTIONS. Directory-level
+# LINK_OPTIONS are inherited by FetchContent subdirectories, so libmsquic.so
+# would be linked against libasan even though its objects have no ASan
+# instrumentation. Loading such a .so alongside an ASan-instrumented test
+# binary causes "incompatible ASan runtimes" at startup.
+#
+# Fix: save and clear both COMPILE_OPTIONS and LINK_OPTIONS before FetchContent;
+# restore after so that our own targets still see the full set.
 get_directory_property(_cfd_saved_compile_opts COMPILE_OPTIONS)
 set_property(DIRECTORY PROPERTY COMPILE_OPTIONS "")
+
+get_directory_property(_cfd_saved_link_opts LINK_OPTIONS)
+set_property(DIRECTORY PROPERTY LINK_OPTIONS "")
 
 # Also save/patch CMAKE_<LANG>_FLAGS for the small set of msquic-internal
 # warnings that are legitimately present in its C code.
@@ -63,6 +73,7 @@ FetchContent_MakeAvailable(msquic)
 set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS_SAVED}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_SAVED}")
 set_property(DIRECTORY PROPERTY COMPILE_OPTIONS "${_cfd_saved_compile_opts}")
+set_property(DIRECTORY PROPERTY LINK_OPTIONS    "${_cfd_saved_link_opts}")
 
 # msquic exports the `msquic` target.
 set(MSQUIC_TARGET msquic CACHE INTERNAL "")

@@ -71,24 +71,23 @@ else()
     endif()
 endif()
 
+# MIPS32 has no native 64-bit atomic instructions; GCC emits __atomic_load_8 /
+# __atomic_store_8 calls from capnproto's layout code, satisfied by libatomic.
+# Must be a PUBLIC dep of cfd_core (not a direct dep of the executables) so that
+# it appears AFTER libcapnp.a in the link order — required because --as-needed
+# discards a library if no unresolved symbols exist when it is first encountered.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "mips64")
+    target_link_libraries(cfd_core PUBLIC atomic)
+endif()
+
 add_executable(cfd main.cpp)
 target_link_libraries(cfd PRIVATE cfd_core)
-
-# MIPS32 has no native 64-bit atomic instructions; GCC emits __atomic_load_8 /
-# __atomic_store_8 calls (from capnproto's layout code) that live in libatomic.
-# Must appear after cfd_core in the link order so --as-needed keeps it.
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "mips64")
-    target_link_libraries(cfd PRIVATE atomic)
-endif()
 
 # End-to-end handshake probe: connects to a Cloudflare edge, negotiates
 # ALPN, prints handshake stats, exits. Useful as a CI gate and for hand
 # debugging from the embedded target.
 add_executable(cfd_probe tools/probe_handshake.cpp)
 target_link_libraries(cfd_probe PRIVATE cfd_core)
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "mips64")
-    target_link_libraries(cfd_probe PRIVATE atomic)
-endif()
 
 if(CFD_STRIP_BINARY AND CMAKE_BUILD_TYPE STREQUAL "Release")
     add_custom_command(TARGET cfd POST_BUILD

@@ -30,5 +30,9 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 add_compile_options(-Os -ffunction-sections -fdata-sections
                     -march=armv5te -mfloat-abi=soft
                     -fno-strict-aliasing)
-# Fully static musl link: zero libc version dependency on target (e.g. Buildroot GLIBC 2.26)
-add_link_options(-static -Wl,--gc-sections -Wl,--as-needed -s)
+# Note: -static is intentionally absent. msquic v2.4.x hardcodes SHARED on Linux
+# (BUILD_SHARED_LIBS=OFF has no effect), so a fully-static link is not possible.
+# The musl toolchain still eliminates any glibc dependency; libstdc++/libgcc are
+# linked statically via -static-libstdc++ -static-libgcc in the root CMakeLists.
+# Deploy libmsquic.so alongside the binary on the target.
+add_link_options(-Wl,--gc-sections -Wl,--as-needed -s)
