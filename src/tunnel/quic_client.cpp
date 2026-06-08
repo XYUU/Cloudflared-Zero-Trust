@@ -120,8 +120,7 @@ const char* embedded_ca_path() noexcept {
 #ifdef __linux__
             fd = cfd_memfd_create("cfd_ca");
             if (fd >= 0) {
-                ::write(fd, kCloudflareCAPem.data(),
-                        static_cast<ssize_t>(kCloudflareCAPem.size()));
+                ::write(fd, kCloudflareCAPem.data(), kCloudflareCAPem.size());
                 std::snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
                 return;
             }

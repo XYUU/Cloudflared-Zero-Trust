@@ -25,8 +25,15 @@ endif()
 # --- Compiler hardening -----------------------------------------------------
 add_compile_options(
     -Wall -Wextra -Wpedantic
-    -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-align
-    -Woverloaded-virtual -Wconversion -Wsign-conversion
+    # C++-only flags — guard with generator expression so they are NOT passed
+    # to C translation units (e.g. msquic's C files), which would produce
+    # "valid for C++/ObjC++ but not for C" warnings that become errors under
+    # msquic's own -Werror.
+    $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>
+    $<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>
+    -Wshadow -Wcast-align
+    -Wconversion -Wsign-conversion
     -Wnull-dereference -Wdouble-promotion -Wformat=2
     -fno-common -fstack-protector-strong
     -D_FORTIFY_SOURCE=2
