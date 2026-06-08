@@ -35,7 +35,7 @@ string(APPEND CMAKE_CXX_FLAGS
 # -Wfree-labels was introduced in GCC 14; trying to suppress it on GCC 13
 # (Ubuntu 24.04 default) causes a fatal "no option '-Wfree-labels'" error.
 
-set(MSQUIC_TAG "v2.4.6" CACHE STRING "msquic git tag")
+set(MSQUIC_TAG "v2.4.7" CACHE STRING "msquic git tag")
 set(QUIC_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
 set(QUIC_BUILD_TEST     OFF CACHE BOOL "" FORCE)
 set(QUIC_BUILD_PERF     OFF CACHE BOOL "" FORCE)
