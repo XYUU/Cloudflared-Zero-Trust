@@ -31,18 +31,6 @@ set_property(DIRECTORY PROPERTY COMPILE_OPTIONS "")
 get_directory_property(_cfd_saved_link_opts LINK_OPTIONS)
 set_property(DIRECTORY PROPERTY LINK_OPTIONS "")
 
-# On 32-bit ARM and MIPS, GCC emits __sync_*_8 / __atomic_*_8 calls for 8-byte
-# atomic ops (no native hardware instruction).  These must be resolved inside
-# libmsquic.so itself at build time; if left undefined in the .so, the final
-# executable link fails because ld checks all referenced symbols are satisfiable.
-# Force-include the static libatomic so the implementations are embedded in the
-# .so and no runtime dependency on libatomic.so.1 is added.
-if((CMAKE_SYSTEM_PROCESSOR MATCHES "^arm"  AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64") OR
-   (CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES  "mips64"))
-    set_property(DIRECTORY APPEND PROPERTY LINK_OPTIONS
-        "-Wl,-Bstatic" "-latomic" "-Wl,-Bdynamic")
-endif()
-
 # Also save/patch CMAKE_<LANG>_FLAGS for the small set of msquic-internal
 # warnings that are legitimately present in its C code.
 set(CMAKE_C_FLAGS_SAVED   "${CMAKE_C_FLAGS}")
@@ -80,6 +68,21 @@ FetchContent_Declare(msquic
             -P ${CMAKE_CURRENT_LIST_DIR}/patches/msquic-mipsel-openssl.cmake
 )
 FetchContent_MakeAvailable(msquic)
+
+# On 32-bit ARM and MIPS, GCC emits __sync_*_8 / __atomic_*_8 calls for 8-byte
+# atomic ops (no native hardware instruction).  These must be resolved inside
+# libmsquic.so itself; if left undefined the executable link fails because ld
+# verifies all .so-internal symbol references are satisfiable.
+#
+# set_property(DIRECTORY LINK_OPTIONS) before FetchContent does NOT propagate
+# reliably into msquic's own subdirectory scope — use target_link_options on
+# the exported target instead (applied AFTER MakeAvailable creates the target).
+# -Wl,-Bstatic/-Bdynamic embeds the static libatomic.a inside the .so so there
+# is no runtime dependency on libatomic.so.1.
+if((CMAKE_SYSTEM_PROCESSOR MATCHES "^arm"  AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64") OR
+   (CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES  "mips64"))
+    target_link_options(msquic PRIVATE "-Wl,-Bstatic" "-latomic" "-Wl,-Bdynamic")
+endif()
 
 # Restore everything so subsequent targets see the full project flags.
 set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS_SAVED}")
