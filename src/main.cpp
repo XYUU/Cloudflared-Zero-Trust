@@ -92,14 +92,15 @@ std::vector<std::string> resolve_edge_ips(const std::string& host,
     if (::getaddrinfo(host.c_str(), svc.c_str(), &hints, &res) == 0 && res) {
         for (addrinfo* a = res; a; a = a->ai_next) {
             char buf[INET6_ADDRSTRLEN]{};
-            if (a->ai_family == AF_INET)
-                ::inet_ntop(AF_INET,
-                    &reinterpret_cast<sockaddr_in*>(a->ai_addr)->sin_addr,
-                    buf, sizeof buf);
-            else if (a->ai_family == AF_INET6)
-                ::inet_ntop(AF_INET6,
-                    &reinterpret_cast<sockaddr_in6*>(a->ai_addr)->sin6_addr,
-                    buf, sizeof buf);
+            if (a->ai_family == AF_INET) {
+                sockaddr_in sa4;
+                std::memcpy(&sa4, a->ai_addr, sizeof sa4);
+                ::inet_ntop(AF_INET, &sa4.sin_addr, buf, sizeof buf);
+            } else if (a->ai_family == AF_INET6) {
+                sockaddr_in6 sa6;
+                std::memcpy(&sa6, a->ai_addr, sizeof sa6);
+                ::inet_ntop(AF_INET6, &sa6.sin6_addr, buf, sizeof buf);
+            }
             if (buf[0]) found.push_back(buf);
         }
         ::freeaddrinfo(res);

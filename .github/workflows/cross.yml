@@ -109,9 +109,10 @@ jobs:
           # symlink alongside cfd (cross-compile + CFD_FETCH_MSQUIC only).
           # Use cp -L to dereference symlinks: artifact uploads handle real files
           # more reliably than symlinks across platforms.
-          for f in "${BUILD}"/src/libmsquic.so.*; do
-            [ -e "$f" ] && cp -L "$f" "${DIST}/$(basename "$f")"
-          done
+          # find exits 0 when no files match; avoids bash set-e false positive
+          # that occurs when a glob expands to a literal non-existent path.
+          find "${BUILD}/src" -maxdepth 1 -name 'libmsquic.so.*' \
+            | while IFS= read -r f; do cp -L "$f" "${DIST}/$(basename "$f")"; done
 
       - name: upload artifact
         uses: actions/upload-artifact@v4

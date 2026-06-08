@@ -81,7 +81,7 @@ FetchContent_MakeAvailable(msquic)
 # is no runtime dependency on libatomic.so.1.
 if((CMAKE_SYSTEM_PROCESSOR MATCHES "^arm"  AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64") OR
    (CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES  "mips64"))
-    target_link_options(msquic PRIVATE "-Wl,-Bstatic" "-latomic" "-Wl,-Bdynamic")
+    target_link_libraries(msquic PRIVATE "-Wl,-Bstatic" "-latomic" "-Wl,-Bdynamic")
 endif()
 
 # Restore everything so subsequent targets see the full project flags.
