@@ -18,8 +18,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, cxx: g++,      cc: gcc,   sanitizers: ON  }
-          - { os: ubuntu-24.04, cxx: clang++,  cc: clang, sanitizers: ON  }
+          - { os: ubuntu-24.04, cxx: g++,      sanitizers: ON  }
+          - { os: ubuntu-24.04, cxx: clang++,  sanitizers: ON  }
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
