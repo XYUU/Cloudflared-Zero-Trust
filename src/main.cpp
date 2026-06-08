@@ -36,7 +36,7 @@
 
 // Number of parallel HA connections cloudflared maintains per tunnel.
 // Cloudflare marks a tunnel HEALTHY only when all NUM_HA_CONNS are active.
-static constexpr int kNumHaConns = 5;
+static constexpr int kNumHaConns = 4;
 
 namespace {
 

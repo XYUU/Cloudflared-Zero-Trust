@@ -6,6 +6,11 @@ if(NOT CFD_TOOLCHAIN_PREFIX)
     set(CFD_TOOLCHAIN_PREFIX "arm-openwrt-linux-muslgnueabi-")
 endif()
 
+# msquic uses GNU_MACHINE as the stem for OpenSSL's --cross-compile-prefix (appends '-').
+# Without it the prefix degenerates to "-" and the OpenSSL cross-build cannot find a compiler.
+string(REGEX REPLACE "-$" "" _gnu_machine "${CFD_TOOLCHAIN_PREFIX}")
+set(GNU_MACHINE "${_gnu_machine}" CACHE STRING "msquic: stem for OpenSSL --cross-compile-prefix")
+
 set(CMAKE_C_COMPILER   ${CFD_TOOLCHAIN_PREFIX}gcc)
 set(CMAKE_CXX_COMPILER ${CFD_TOOLCHAIN_PREFIX}g++)
 set(CMAKE_AR           ${CFD_TOOLCHAIN_PREFIX}ar)

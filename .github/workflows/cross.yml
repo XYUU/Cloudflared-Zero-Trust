@@ -49,8 +49,9 @@ jobs:
           sudo apt-get update
           # capnproto: host-side code generator (capnp compile runs on the host
           # even when cross-compiling; target libs come from CFD_FETCH_CAPNP).
-          # libssl-dev and libnuma-dev are needed for msquic host-side checks and tools.
-          sudo apt-get install -y ninja-build cmake capnproto libssl-dev libnuma-dev
+          # msquic uses its bundled opensslquic submodule (QUIC_TLS=openssl,
+          # QUIC_BUILD_TOOLS=OFF), so system libssl-dev and libnuma-dev are not needed.
+          sudo apt-get install -y ninja-build cmake capnproto
           if [ -n "${{ matrix.apt }}" ]; then
             sudo apt-get install -y ${{ matrix.apt }}
           fi
