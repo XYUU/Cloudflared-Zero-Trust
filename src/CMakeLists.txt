@@ -98,7 +98,7 @@ target_link_libraries(cfd_probe PRIVATE cfd_core)
 # alongside the binary so the deployment directory is self-contained.
 # The dynamic linker resolves libraries by SONAME, so libmsquic.so.2.4.5 alone
 # is not enough — the symlink named libmsquic.so.2 must also be present.
-if(CMAKE_CROSSCOMPILING AND CFD_FETCH_MSQUIC)
+if(CFD_FETCH_MSQUIC)
     add_custom_command(TARGET cfd POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:msquic>
