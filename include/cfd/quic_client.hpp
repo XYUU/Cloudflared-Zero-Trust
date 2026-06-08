@@ -49,6 +49,11 @@ public:
     using InboundHandler = std::function<void(const std::uint8_t*, std::size_t)>;
     void set_inbound_handler(InboundHandler h);
 
+    // Called from msquic worker thread when a previously-connected connection drops.
+    // Safe to set or change at any time; fires at most once per connect() attempt.
+    using DisconnectHandler = std::function<void()>;
+    void set_disconnect_handler(DisconnectHandler h);
+
     void close() noexcept;
 
 private:

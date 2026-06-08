@@ -7,8 +7,8 @@
 //   2. Open and configure TUN device
 //   3. Resolve edge IPs; create NUM_HA_CONNS QuicClient instances
 //   4. Build router with round-robin multi-sink over all tunnel connections
-//   5. Connect + RegisterConnection in parallel for each connection
-//   6. Start packet pump (TUN -> Router -> QUIC, QUIC datagram -> TUN)
+//   5. Per-connection threads each run a connect→register→reconnect loop
+//   6. Start packet pump once the first connection is healthy
 //   7. Wait for SIGINT/SIGTERM, then orderly teardown
 
 #include "cfd/config.hpp"
@@ -19,7 +19,11 @@
 
 #include <arpa/inet.h>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <csignal>
+#include <future>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -36,9 +40,14 @@ static constexpr int kNumHaConns = 5;
 
 namespace {
 
-std::atomic<bool> g_stop{false};
+std::atomic<bool>       g_stop{false};
+std::mutex              g_wakeup_mu;
+std::condition_variable g_wakeup_cv;
 
-void on_signal(int) noexcept { g_stop.store(true, std::memory_order_relaxed); }
+void on_signal(int) noexcept {
+    g_stop.store(true, std::memory_order_relaxed);
+    g_wakeup_cv.notify_all();
+}
 
 void install_signals() {
     struct sigaction sa{};
@@ -47,6 +56,13 @@ void install_signals() {
     ::sigaction(SIGINT,  &sa, nullptr);
     ::sigaction(SIGTERM, &sa, nullptr);
     std::signal(SIGPIPE, SIG_IGN);
+}
+
+// Sleeps up to `ms` milliseconds, waking early if g_stop is set.
+void interruptible_sleep(int ms) noexcept {
+    std::unique_lock<std::mutex> lk(g_wakeup_mu);
+    g_wakeup_cv.wait_for(lk, std::chrono::milliseconds(ms),
+        [] { return g_stop.load(std::memory_order_relaxed); });
 }
 
 void print_usage() {
@@ -171,9 +187,6 @@ int main(int argc, char** argv) {
     }
 
     // ---- Resolve edge IPs ---------------------------------------------------
-    // Cloudflare expects NUM_HA_CONNS connections, ideally to different PoPs.
-    // We resolve all A/AAAA records for edge_host and distribute one IP per
-    // connection; if DNS returns fewer than NUM_HA_CONNS we cycle the list.
     const auto edge_ips = resolve_edge_ips(cfg.edge_host, cfg.edge_port,
                                            kNumHaConns);
     LOG_INFO("edge resolved: %zu unique IP(s) for %d connections",
@@ -209,94 +222,194 @@ int main(int argc, char** argv) {
     }
 
     // ---- Router with round-robin multi-sink ---------------------------------
-    {
-        std::vector<std::shared_ptr<cfd::router::IPacketSink>> sinks(
-            clients.begin(), clients.end());
-        auto sink = std::make_shared<MultiSink>(std::move(sinks));
+    std::vector<std::shared_ptr<cfd::router::IPacketSink>> sinks(
+        clients.begin(), clients.end());
+    auto sink = std::make_shared<MultiSink>(std::move(sinks));
+    auto router = std::make_unique<cfd::router::Router>(tun, sink);
+    for (const auto& c : cfg.routed_cidrs)
+        router->add_route(c, cfd::router::Action::ToTunnel);
 
-        auto router = std::make_unique<cfd::router::Router>(tun, sink);
-        for (const auto& c : cfg.routed_cidrs)
-            router->add_route(c, cfd::router::Action::ToTunnel);
+    for (auto& cl : clients) {
+        cl->set_inbound_handler(
+            [r = router.get()](const std::uint8_t* d,
+                               std::size_t n) noexcept {
+                r->inject_from_tunnel(d, n);
+            });
+    }
 
-        // Inbound: every client delivers into the same router.
-        for (auto& cl : clients) {
-            cl->set_inbound_handler(
-                [r = router.get()](const std::uint8_t* d,
-                                   std::size_t n) noexcept {
-                    r->inject_from_tunnel(d, n);
-                });
-        }
+    // ---- Per-connection reconnect threads -----------------------------------
+    // Each thread owns one conn_index and loops: connect → register → wait for
+    // disconnect → backoff → repeat.  Mirrors cloudflared's connection supervisor
+    // (connection/supervisor.go) which retries each connection independently.
+    std::atomic<int> ok_count{0};
 
-        // ---- Phase 1: connect NUM_HA_CONNS in parallel (QUIC handshake) ------
-        // register_connection() runs a KJ event loop per call; creating
-        // multiple simultaneous KJ loops from different threads is fragile.
-        // We therefore split the work: parallel connect (pure msquic, safe),
-        // then sequential register on the main thread (single KJ loop at a time).
-        // Use int, not bool: vector<bool> packs bits and concurrent writes to
-        // adjacent elements race on the same byte even when indices differ.
-        std::vector<int> connected(static_cast<std::size_t>(kNumHaConns), 0);
-        {
-            std::vector<std::thread> ts;
-            ts.reserve(static_cast<std::size_t>(kNumHaConns));
-            for (int i = 0; i < kNumHaConns; ++i) {
-                ts.emplace_back([&, i]() {
-                    if (auto ec = clients[static_cast<std::size_t>(i)]->connect();
-                        ec) {
-                        LOG_WARN("conn[%d] connect failed: %s",
-                                 i, ec.message().c_str());
-                    } else {
-                        connected[static_cast<std::size_t>(i)] = 1;
-                    }
-                });
+    static constexpr int kInitBackoffMs = 1000;
+    static constexpr int kMaxBackoffMs  = 32000;
+
+    // register_connection() creates a kj::EventLoop; KJ is NOT safe when event
+    // loops are instantiated on multiple different threads — even sequentially.
+    // Solution: a single dedicated "KJ thread" processes all registrations.
+    // Reconnect threads post work items and block on std::future for the result.
+    struct RegWork {
+        cfd::tunnel::QuicClient*     cl;
+        cfd::tunnel::RegisterRequest rreq;
+        std::promise<std::pair<std::error_code, cfd::tunnel::RegisterResponse>> promise;
+    };
+    std::mutex              kj_mu;
+    std::condition_variable kj_cv;
+    std::deque<RegWork>     kj_queue;
+    bool                    kj_stop{false};
+
+    std::thread kj_thread([&] {
+        while (true) {
+            RegWork work;
+            {
+                std::unique_lock<std::mutex> lk(kj_mu);
+                kj_cv.wait(lk, [&] { return !kj_queue.empty() || kj_stop; });
+                if (kj_queue.empty()) break;  // kj_stop and queue drained
+                work = std::move(kj_queue.front());
+                kj_queue.pop_front();
             }
-            for (auto& t : ts) t.join();
-            // After join(): all writes by each connect thread are visible here
-            // (std::thread::join() provides a happens-before guarantee).
+            cfd::tunnel::RegisterResponse resp;
+            auto ec = work.cl->register_connection(work.rreq, resp, 15'000);
+            work.promise.set_value({ec, std::move(resp)});
         }
+        // Drain any remaining entries with an error (g_stop path).
+        std::unique_lock<std::mutex> lk(kj_mu);
+        for (auto& w : kj_queue)
+            w.promise.set_value({std::make_error_code(std::errc::connection_aborted), {}});
+        kj_queue.clear();
+    });
 
-        // ---- Phase 2: register sequentially on the main thread --------------
-        // Each register_connection() call drives a fresh KJ event loop to
-        // completion before the next starts — no concurrent KJ loops.
-        std::atomic<int> ok_count{0};
-        for (int i = 0; i < kNumHaConns; ++i) {
-            if (!connected[static_cast<std::size_t>(i)]) continue;  // 0 = failed
+    std::vector<std::thread> conn_threads;
+    conn_threads.reserve(static_cast<std::size_t>(kNumHaConns));
+
+    for (int i = 0; i < kNumHaConns; ++i) {
+        conn_threads.emplace_back([&, i]() {
             auto& cl = clients[static_cast<std::size_t>(i)];
 
-            cfd::tunnel::RegisterRequest rreq = rreq_tmpl;
-            rreq.conn_index = static_cast<std::uint8_t>(i);
+            // disc_fired is set from the msquic worker thread via the callback;
+            // g_wakeup_cv wakes the wait() below.
+            std::atomic<bool> disc_fired{false};
+            cl->set_disconnect_handler([&disc_fired]() {
+                disc_fired.store(true, std::memory_order_release);
+                g_wakeup_cv.notify_all();
+            });
 
-            cfd::tunnel::RegisterResponse rresp;
-            if (auto ec = cl->register_connection(rreq, rresp, 15'000); ec) {
-                LOG_WARN("conn[%d] register failed: %s",
-                         i, ec.message().c_str());
+            int backoff_ms = kInitBackoffMs;
+
+            while (!g_stop.load(std::memory_order_relaxed)) {
+                disc_fired.store(false, std::memory_order_relaxed);
                 cl->close();
-                continue;
+
+                if (auto ec = cl->connect(); ec) {
+                    LOG_WARN("conn[%d] connect failed: %s",
+                             i, ec.message().c_str());
+                    interruptible_sleep(backoff_ms);
+                    backoff_ms = std::min(backoff_ms * 2, kMaxBackoffMs);
+                    continue;
+                }
+
+                // Submit registration to the dedicated KJ thread and wait.
+                cfd::tunnel::RegisterRequest rreq = rreq_tmpl;
+                rreq.conn_index = static_cast<std::uint8_t>(i);
+                std::future<std::pair<std::error_code, cfd::tunnel::RegisterResponse>> fut;
+                {
+                    RegWork w;
+                    w.cl   = cl.get();
+                    w.rreq = std::move(rreq);
+                    fut    = w.promise.get_future();
+                    std::lock_guard<std::mutex> lk(kj_mu);
+                    kj_queue.push_back(std::move(w));
+                    kj_cv.notify_one();
+                }
+                auto [reg_ec, rresp] = fut.get();
+
+                if (reg_ec) {
+                    LOG_WARN("conn[%d] register failed: %s (retry_after=%llds)",
+                             i, reg_ec.message().c_str(),
+                             static_cast<long long>(rresp.retry_after_seconds));
+                    cl->close();
+                    // Honour the server's requested retry delay; fall back to backoff.
+                    int wait_ms = (rresp.retry_after_seconds > 0)
+                        ? static_cast<int>(std::min(
+                              rresp.retry_after_seconds,
+                              static_cast<std::int64_t>(kMaxBackoffMs / 1000))) * 1000
+                        : backoff_ms;
+                    interruptible_sleep(wait_ms);
+                    backoff_ms = std::min(backoff_ms * 2, kMaxBackoffMs);
+                    continue;
+                }
+
+                // Registered successfully — reset backoff and advertise health.
+                backoff_ms    = kInitBackoffMs;
+                int now_ok = ok_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                LOG_INFO("conn[%d] registered at %s; healthy=%d/%d",
+                         i, rresp.location_name.c_str(), now_ok, kNumHaConns);
+                g_wakeup_cv.notify_all();
+
+                // Block until the connection drops or shutdown is requested.
+                {
+                    std::unique_lock<std::mutex> lk(g_wakeup_mu);
+                    g_wakeup_cv.wait(lk, [&] {
+                        return disc_fired.load(std::memory_order_acquire) ||
+                               g_stop.load(std::memory_order_relaxed);
+                    });
+                }
+
+                int now_ok2 = ok_count.fetch_sub(1, std::memory_order_relaxed) - 1;
+                if (disc_fired.load(std::memory_order_relaxed) &&
+                    !g_stop.load(std::memory_order_relaxed)) {
+                    LOG_WARN("conn[%d] disconnected; healthy=%d/%d",
+                             i, now_ok2, kNumHaConns);
+                    interruptible_sleep(backoff_ms);
+                    backoff_ms = std::min(backoff_ms * 2, kMaxBackoffMs);
+                }
             }
 
-            LOG_INFO("conn[%d] registered at %s",
-                     i, rresp.location_name.c_str());
-            ok_count.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        if (ok_count.load() == 0) {
-            LOG_ERROR("all %d connections failed; aborting", kNumHaConns);
-            return 1;
-        }
-        LOG_INFO("tunnel up: %d/%d connections healthy",
-                 ok_count.load(), kNumHaConns);
-
-        // ---- Packet pump ----------------------------------------------------
-        router->start();
-        LOG_INFO("cfd running. Ctrl-C to stop.");
-
-        while (!g_stop.load(std::memory_order_relaxed))
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-        // ---- Orderly teardown -----------------------------------------------
-        LOG_INFO("shutting down");
-        router->stop();
-        for (auto& cl : clients) cl->close();
-        // router destroyed here (UniquePtr dtor), then clients, then tun.
+            // Clear callback before tearing down to avoid a dangling reference to
+            // the stack-local disc_fired after the thread function returns.
+            cl->set_disconnect_handler(nullptr);
+            cl->close();
+        });
     }
-    return 0;
+
+    // ---- Wait for the first healthy connection (60 s timeout) ---------------
+    {
+        std::unique_lock<std::mutex> lk(g_wakeup_mu);
+        g_wakeup_cv.wait_for(lk, std::chrono::seconds(60), [&] {
+            return ok_count.load(std::memory_order_relaxed) > 0 ||
+                   g_stop.load(std::memory_order_relaxed);
+        });
+    }
+    auto shutdown_all = [&](int exit_code) -> int {
+        g_stop.store(true, std::memory_order_relaxed);
+        g_wakeup_cv.notify_all();
+        for (auto& cl : clients) cl->close();
+        for (auto& t : conn_threads) t.join();
+        { std::lock_guard<std::mutex> lk(kj_mu); kj_stop = true; }
+        kj_cv.notify_all();
+        kj_thread.join();
+        return exit_code;
+    };
+
+    if (g_stop.load())
+        return shutdown_all(1);
+
+    if (ok_count.load() == 0) {
+        LOG_ERROR("no connections established after 60 s; aborting");
+        return shutdown_all(1);
+    }
+
+    // ---- Packet pump --------------------------------------------------------
+    router->start();
+    LOG_INFO("cfd running. Ctrl-C to stop.");
+
+    while (!g_stop.load(std::memory_order_relaxed))
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // ---- Orderly teardown ---------------------------------------------------
+    LOG_INFO("shutting down");
+    router->stop();
+    return shutdown_all(0);
 }

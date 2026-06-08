@@ -35,7 +35,7 @@ string(APPEND CMAKE_CXX_FLAGS
 # -Wfree-labels was introduced in GCC 14; trying to suppress it on GCC 13
 # (Ubuntu 24.04 default) causes a fatal "no option '-Wfree-labels'" error.
 
-set(MSQUIC_TAG "v2.4.5" CACHE STRING "msquic git tag")
+set(MSQUIC_TAG "v2.4.6" CACHE STRING "msquic git tag")
 set(QUIC_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
 set(QUIC_BUILD_TEST     OFF CACHE BOOL "" FORCE)
 set(QUIC_BUILD_PERF     OFF CACHE BOOL "" FORCE)
@@ -43,11 +43,24 @@ set(QUIC_TLS            "openssl" CACHE STRING "" FORCE)
 set(QUIC_ENABLE_LOGGING OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS   OFF CACHE BOOL "" FORCE)
 
+# For cross-compiling, msquic's internal OpenSSL build can be flaky.
+# If we are on the host, prefer system OpenSSL.
+if(NOT CMAKE_CROSSCOMPILING)
+    find_package(OpenSSL QUIET)
+    if(OPENSSL_FOUND)
+        message(STATUS "Found system OpenSSL, disabling msquic internal OpenSSL build")
+        set(QUIC_USE_SYSTEM_LIBCRYPTO ON CACHE BOOL "" FORCE)
+    endif()
+endif()
+
 FetchContent_Declare(msquic
     GIT_REPOSITORY https://github.com/microsoft/msquic.git
     GIT_TAG        ${MSQUIC_TAG}
     GIT_SHALLOW    TRUE
     GIT_SUBMODULES_RECURSE TRUE
+    # Workaround for msquic 2.4.x bug: -latomic is incorrectly passed as a top-level 
+    # argument to OpenSSL's Configure script, causing configuration failure.
+    PATCH_COMMAND sed -i "/-latomic/d" submodules/CMakeLists.txt
 )
 FetchContent_MakeAvailable(msquic)
 

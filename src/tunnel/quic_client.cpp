@@ -391,11 +391,21 @@ public:
     }
 
     std::error_code connect() {
-        if (const auto s = detail::api_table_init(); QUIC_FAILED(s)) {
-            LOG_ERROR("MsQuicOpen2 failed 0x%x", s);
-            return std::make_error_code(std::errc::protocol_error);
+        // Reset handshake flags so this object can be reused after close()+connect().
+        {
+            std::lock_guard<std::mutex> lk(state_mu_);
+            handshake_done_ = false;
+            handshake_ok_   = false;
+            disc_notified_  = false;
         }
-        api_held_ = true;
+
+        if (!api_held_) {
+            if (const auto s = detail::api_table_init(); QUIC_FAILED(s)) {
+                LOG_ERROR("MsQuicOpen2 failed 0x%x", s);
+                return std::make_error_code(std::errc::protocol_error);
+            }
+            api_held_ = true;
+        }
 
         // --- Registration ---
         QUIC_REGISTRATION_CONFIG rc{"cfd", QUIC_EXECUTION_PROFILE_LOW_LATENCY};
@@ -700,8 +710,14 @@ public:
         handler_ = std::move(h);
     }
 
+    void set_handler_disconnect(QuicClient::DisconnectHandler h) {
+        std::lock_guard<std::mutex> lk(state_mu_);
+        disconnect_handler_ = std::move(h);
+    }
+
     void close() noexcept {
-        // Shut down gracefully if still connected; UniqueHandle dtors do the rest.
+        // Serialise concurrent close() calls (e.g. reconnect thread + main teardown).
+        std::lock_guard<std::mutex> ck(close_mu_);
         if (connection_) {
             detail::g_msquic->ConnectionShutdown(
                 connection_.get(), QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
@@ -748,25 +764,17 @@ private:
                 LOG_WARN("QUIC shutdown by transport: status=0x%x error=0x%llx",
                          ev.SHUTDOWN_INITIATED_BY_TRANSPORT.Status,
                          (unsigned long long)ev.SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode);
-                std::lock_guard<std::mutex> lk(state_mu_);
-                handshake_done_ = true;
-                state_cv_.notify_all();
+                fire_disconnect_locked_();
                 break;
             }
             case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER: {
                 LOG_WARN("QUIC shutdown by peer: error=0x%llx",
                          (unsigned long long)ev.SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
-                std::lock_guard<std::mutex> lk(state_mu_);
-                handshake_done_ = true;
-                state_cv_.notify_all();
+                fire_disconnect_locked_();
                 break;
             }
             case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
-                {
-                    std::lock_guard<std::mutex> lk(state_mu_);
-                    handshake_done_ = true;
-                }
-                state_cv_.notify_all();
+                fire_disconnect_locked_();
                 break;
             }
             case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED: {
@@ -822,6 +830,22 @@ private:
         return QUIC_STATUS_SUCCESS;
     }
 
+    // Sets handshake_done_ and, if this is the first shutdown after a successful
+    // handshake, copies and fires the disconnect_handler_ outside the lock.
+    void fire_disconnect_locked_() noexcept {
+        QuicClient::DisconnectHandler h;
+        {
+            std::lock_guard<std::mutex> lk(state_mu_);
+            handshake_done_ = true;
+            if (handshake_ok_ && !disc_notified_) {
+                disc_notified_ = true;
+                h = disconnect_handler_;
+            }
+        }
+        state_cv_.notify_all();
+        if (h) h();
+    }
+
     void deliver_inbound(const std::uint8_t* data, std::uint32_t len) noexcept {
         DecodeResult dr{};
         if (!decode(std::span<const std::uint8_t>(data, len), dr)) return;
@@ -840,18 +864,22 @@ private:
     // `connection_`. ConnectionClose drains callbacks synchronously, so once
     // `connection_` is destroyed the callbacks can no longer fire — making it
     // safe for the trailing members to die next.
-    QuicConfig                  cfg_;
-    bool                        api_held_{false};
+    QuicConfig                     cfg_;
+    bool                           api_held_{false};
 
-    std::mutex                  state_mu_;
-    std::condition_variable     state_cv_;
-    bool                        handshake_done_{false};
-    bool                        handshake_ok_{false};
-    QuicClient::InboundHandler  handler_;
+    std::mutex                     state_mu_;
+    std::condition_variable        state_cv_;
+    bool                           handshake_done_{false};
+    bool                           handshake_ok_{false};
+    bool                           disc_notified_{false};
+    QuicClient::InboundHandler     handler_;
+    QuicClient::DisconnectHandler  disconnect_handler_;
 
-    detail::UniqueHandle        registration_;
-    detail::UniqueHandle        configuration_;
-    detail::UniqueHandle        connection_;
+    std::mutex                     close_mu_;
+
+    detail::UniqueHandle           registration_;
+    detail::UniqueHandle           configuration_;
+    detail::UniqueHandle           connection_;
 };
 
 #else  // ---------- stub when built without msquic ----------
@@ -865,6 +893,7 @@ public:
     }
     void send_packet(const std::uint8_t*, std::size_t) noexcept {}
     void set_handler(QuicClient::InboundHandler) {}
+    void set_handler_disconnect(QuicClient::DisconnectHandler) {}
     void close() noexcept {}
     std::error_code register_connection(const RegisterRequest&, RegisterResponse&, int) {
         return std::make_error_code(std::errc::not_supported);
@@ -885,6 +914,7 @@ QuicClient::~QuicClient() = default;
 std::error_code QuicClient::connect()                                       { return impl_->connect(); }
 void QuicClient::on_packet(const std::uint8_t* d, std::size_t n) noexcept  { impl_->send_packet(d, n); }
 void QuicClient::set_inbound_handler(InboundHandler h)                      { impl_->set_handler(std::move(h)); }
+void QuicClient::set_disconnect_handler(DisconnectHandler h)                { impl_->set_handler_disconnect(std::move(h)); }
 void QuicClient::close() noexcept                                           { impl_->close(); }
 std::error_code QuicClient::register_connection(const RegisterRequest& r,
                                                 RegisterResponse& out,
