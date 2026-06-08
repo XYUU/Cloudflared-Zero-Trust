@@ -44,6 +44,16 @@ set(QUIC_ENABLE_LOGGING OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS   OFF CACHE BOOL "" FORCE)
 
 # For cross-compiling, msquic's internal OpenSSL build can be flaky.
+# It depends on GNU_MACHINE to set --cross-compile-prefix, but doesn't always 
+# define it itself.
+if(CMAKE_CROSSCOMPILING)
+    if(CFD_TOOLCHAIN_PREFIX)
+        # Strip the trailing dash if present, as msquic appends it back with FLOAT_ABI_SUFFIX
+        string(REGEX REPLACE "-$" "" GNU_MACHINE_INTERNAL "${CFD_TOOLCHAIN_PREFIX}")
+        set(GNU_MACHINE "${GNU_MACHINE_INTERNAL}" CACHE STRING "" FORCE)
+    endif()
+endif()
+
 # If we are on the host, prefer system OpenSSL.
 if(NOT CMAKE_CROSSCOMPILING)
     find_package(OpenSSL QUIET)
