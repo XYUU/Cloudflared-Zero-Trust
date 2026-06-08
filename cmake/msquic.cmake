@@ -48,6 +48,14 @@ FetchContent_Declare(msquic
     GIT_TAG        ${MSQUIC_TAG}
     GIT_SHALLOW    TRUE
     GIT_SUBMODULES_RECURSE TRUE
+    # Patch: msquic has no MIPS branch for OpenSSL; without this, the 'config'
+    # auto-detect script runs on the x86-64 host, picks linux-x86_64, and injects
+    # -m64 which mipsel-linux-gnu-gcc rejects.  The script is idempotent.
+    PATCH_COMMAND
+        ${CMAKE_COMMAND}
+            -DSOURCE_DIR=<SOURCE_DIR>
+            -DCMAKE_SYSTEM_PROCESSOR=${CMAKE_SYSTEM_PROCESSOR}
+            -P ${CMAKE_CURRENT_LIST_DIR}/patches/msquic-mipsel-openssl.cmake
 )
 FetchContent_MakeAvailable(msquic)
 

@@ -58,7 +58,7 @@ bool base64_decode(const std::string& in, std::vector<std::uint8_t>& out) {
         std::int32_t v[4]{-1, -1, -1, -1};
         const bool last = (i + 4 == in.size());
         for (int k = 0; k < 4; ++k) {
-            const char c = in[i + k];
+            const char c = in[i + static_cast<std::size_t>(k)];
             if (c == '=') {
                 if (!last || k < 2) return false;          // pad in wrong place
                 v[k] = -2;

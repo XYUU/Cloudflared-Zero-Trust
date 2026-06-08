@@ -29,6 +29,6 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
 add_compile_options(-Os -ffunction-sections -fdata-sections
                     -march=armv5te -mfloat-abi=soft
-                    -fno-exceptions -fno-rtti -fno-strict-aliasing)
+                    -fno-strict-aliasing)
 # Fully static musl link: zero libc version dependency on target (e.g. Buildroot GLIBC 2.26)
 add_link_options(-static -Wl,--gc-sections -Wl,--as-needed -s)

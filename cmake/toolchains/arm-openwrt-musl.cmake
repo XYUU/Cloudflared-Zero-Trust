@@ -28,6 +28,5 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
 add_compile_options(-Os -ffunction-sections -fdata-sections
-                    -mfloat-abi=hard -mfpu=neon
-                    -fno-exceptions -fno-rtti)
+                    -mfloat-abi=hard -mfpu=neon)
 add_link_options(-Wl,--gc-sections -Wl,--as-needed -s)
