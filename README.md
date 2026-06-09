@@ -37,6 +37,9 @@ cmake -B build-arm \
 cmake --build build-arm -j
 ```
 
+## 前置条件
+为了保证数据吞吐量，暂未计划开发用户态tun。本项目需用到/dev/net/tun设备（内核态），如果linux内核中无此设备，则无法运行。
+
 ## 运行
 ### 配置生成
 - (二选一)
