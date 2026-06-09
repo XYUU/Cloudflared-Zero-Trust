@@ -47,7 +47,18 @@ bool eq(const char* a, const char* b) noexcept { return std::strcmp(a, b) == 0; 
 
 }  // namespace
 
+// Probe entrypoint.
+// Flow:
+//  1) Parse CLI flags and validate required inputs.
+//  2) Optionally initialize registration/config-backed settings.
+//  3) Build MsQuic registration/configuration and start the connection.
+//  4) Wait for CONNECTED or SHUTDOWN, then print outcome and elapsed time.
+// Exit codes:
+//  0 => handshake succeeded
+//  1 => handshake failed
+//  2 => usage/configuration error
 int main(int argc, char** argv) {
+    // User-provided probe target and protocol parameters.
     std::string host;
     std::uint16_t port      = 7844;
     std::string alpn        = "argotunnel";
@@ -58,6 +69,7 @@ int main(int argc, char** argv) {
     bool do_register        = false;
     int  timeout_ms         = 10'000;
 
+    // Parse CLI options. Unknown/malformed arguments are handled as usage errors.
     int i = 1;
     while (i < argc) {
         const char* arg = argv[i];
