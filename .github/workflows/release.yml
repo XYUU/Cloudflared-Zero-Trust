@@ -19,16 +19,37 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64,   apt: '',                                            prefix: '',                          toolchain: '' }
-          - { target: mipsel,   apt: gcc-mipsel-linux-gnu g++-mipsel-linux-gnu,     prefix: mipsel-linux-gnu-,           toolchain: cmake/toolchains/mipsel-openwrt-musl.cmake }
-          - { target: arm,      apt: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf, prefix: arm-linux-gnueabihf-,      toolchain: cmake/toolchains/arm-openwrt-musl.cmake }
-          - { target: arm-eabi5, apt: gcc-arm-linux-gnueabi g++-arm-linux-gnueabi, prefix: arm-buildroot-linux-musleabi-, toolchain: cmake/toolchains/arm-eabi5-openwrt-musl.cmake }
+          - { target: x86_64,   apt: '',                                            musl_url: '',                                                                                prefix: '',                          toolchain: '' }
+          - { target: mipsel,   apt: gcc-mipsel-linux-gnu g++-mipsel-linux-gnu,     musl_url: '',                                                                                prefix: mipsel-linux-gnu-,           toolchain: cmake/toolchains/mipsel-openwrt-musl.cmake }
+          - { target: arm,      apt: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf, musl_url: '',                                                                                prefix: arm-linux-gnueabihf-,      toolchain: cmake/toolchains/arm-openwrt-musl.cmake }
+          - { target: arm-eabi5, apt: '',                                            musl_url: https://toolchains.bootlin.com/downloads/releases/toolchains/armv5-eabi/tarballs/armv5-eabi--musl--stable-2024.05-1.tar.xz, prefix: arm-buildroot-linux-musleabi-, toolchain: cmake/toolchains/arm-eabi5-openwrt-musl.cmake }
     steps:
       - uses: actions/checkout@v4
 
       - run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build cmake libcapnp-dev capnproto ${{ matrix.apt }}
+
+      - name: cache musl cross toolchain
+        if: matrix.musl_url != ''
+        id: musl-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/cross
+          key: musl-${{ matrix.target }}-${{ hashFiles('.github/workflows/release.yml') }}
+
+      - name: fetch musl cross toolchain
+        if: matrix.musl_url != '' && steps.musl-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo mkdir -p /opt/cross
+          curl --retry 5 --retry-delay 5 --retry-all-errors -fSL \
+            "${{ matrix.musl_url }}" -o /tmp/cross.tar.xz
+          sudo tar -xf /tmp/cross.tar.xz -C /opt/cross --strip-components=1
+          rm -f /tmp/cross.tar.xz
+
+      - name: export musl toolchain to PATH
+        if: matrix.musl_url != ''
+        run: echo "/opt/cross/bin" >> "$GITHUB_PATH"
 
       - name: configure (host)
         if: matrix.target == 'x86_64'
