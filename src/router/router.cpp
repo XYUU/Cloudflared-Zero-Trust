@@ -80,7 +80,7 @@ void Router::stop() noexcept {
         const char b = 1;
         // Best-effort -- if the write fails the reader will eventually exit
         // through its idle timeout (set in poll() below).
-        [[maybe_unused]] auto _wr = ::write(wake_w_.get(), &b, 1);
+        (void)::write(wake_w_.get(), &b, 1);
     }
     if (reader_.joinable()) reader_.join();
     wake_w_.reset();
