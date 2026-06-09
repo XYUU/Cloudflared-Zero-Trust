@@ -38,9 +38,19 @@ cmake --build build-arm -j
 ```
 
 ## 运行
+### 配置生成
+- (二选一)
+['token_decode'](scripts/token_decode.sh)提供了解码配置的能力，cloudflared部署时，页面会提示一个形如：
+```
+cloudflared tunnel run --token Base64编码的你的token
+```
+将"Base64编码的你的token"放在命令行末尾作为参数传入脚本即可解码json配置。
+或者：
+- 在一台普通机器上跑一次 `cloudflared tunnel create my-router`，生成的
+   `<UUID>.json` 里的字段就是配置信息。
 
-1. 在一台普通机器上跑一次 `cloudflared tunnel create my-router`，把生成的
-   `<UUID>.json` 里的字段填到 [`docs/config.example.ini`](docs/config.example.ini)。
+### 使用方法
+1. 将配置填到 示例配置文件[`docs/config.example.ini`](docs/config.example.ini)，并拷贝为cfd.ini。
 2. 在 Zero Trust Dashboard：`cloudflared tunnel route ip add <CIDR> <UUID>`。
 3. 在 WARP 客户端：Settings → Split Tunnel → Include `<CIDR>`。
 4. 在光猫上：
