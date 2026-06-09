@@ -27,12 +27,16 @@ bool parse_uuid(const std::string& s, std::array<std::uint8_t, 16>& out) noexcep
     for (std::size_t d : dashes) if (s[d] != '-') return false;
 
     std::size_t bi = 0;
-    for (std::size_t i = 0; i < 36; ++i) {
-        if (s[i] == '-') continue;
+    std::size_t i = 0;
+    while (i < 36) {
+        if (s[i] == '-') {
+            ++i;
+            continue;
+        }
         std::uint8_t hi, lo;
         if (!hex(s[i], hi) || !hex(s[i + 1], lo)) return false;
         out[bi++] = static_cast<std::uint8_t>((hi << 4) | lo);
-        ++i;
+        i += 2;
     }
     return bi == 16;
 }
