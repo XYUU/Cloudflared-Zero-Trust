@@ -98,20 +98,18 @@ target_link_libraries(cfd PRIVATE cfd_core)
 add_executable(cfd_probe tools/probe_handshake.cpp)
 target_link_libraries(cfd_probe PRIVATE cfd_core)
 
-# When cross-compiling with FetchContent msquic the binary carries a $ORIGIN
-# RPATH. Stage the versioned .so and its SONAME symlink (libmsquic.so.2)
-# alongside the binary so the deployment directory is self-contained.
-# The dynamic linker resolves libraries by SONAME, so libmsquic.so.2.4.5 alone
-# is not enough — the symlink named libmsquic.so.2 must also be present.
+# Stage libmsquic.so.2 alongside the cfd binary so the $ORIGIN RPATH resolves
+# at deployment without ldconfig or LD_LIBRARY_PATH.
+#
+# The dynamic linker looks for the library by its SONAME (libmsquic.so.2), not
+# by the versioned filename.  Copying $<TARGET_FILE:msquic> (the actual .so
+# binary, never a symlink) as libmsquic.so.2 is sufficient and avoids the
+# platform-specific versioned naming ($<TARGET_FILE> may expand to either
+# libmsquic.so.2.4.5 or libmsquic.2.so.2.4.5 depending on cmake version).
 if(CFD_FETCH_MSQUIC)
     add_custom_command(TARGET cfd POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:msquic>
-            $<TARGET_FILE_DIR:cfd>/libmsquic.so.2.4.5
-        COMMAND ${CMAKE_COMMAND} -E remove -f
-            $<TARGET_FILE_DIR:cfd>/libmsquic.so.2
-        COMMAND ${CMAKE_COMMAND} -E create_symlink
-            libmsquic.so.2.4.5
             $<TARGET_FILE_DIR:cfd>/libmsquic.so.2
         COMMENT "Staging libmsquic.so.2 alongside cfd"
     )

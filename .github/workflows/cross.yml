@@ -105,14 +105,10 @@ jobs:
           BUILD=build-${{ matrix.target }}
           mkdir -p "${DIST}"
           cp "${BUILD}/src/cfd" "${BUILD}/src/cfd_probe" "${DIST}/"
-          # POST_BUILD stages libmsquic.so.2.4.5 and the libmsquic.so.2 SONAME
-          # symlink alongside cfd (cross-compile + CFD_FETCH_MSQUIC only).
-          # Use cp -L to dereference symlinks: artifact uploads handle real files
-          # more reliably than symlinks across platforms.
-          # find exits 0 when no files match; avoids bash set-e false positive
-          # that occurs when a glob expands to a literal non-existent path.
-          find "${BUILD}/src" -maxdepth 1 -name 'libmsquic.so.*' \
-            | while IFS= read -r f; do cp -L "$f" "${DIST}/$(basename "$f")"; done
+          # POST_BUILD copies $<TARGET_FILE:msquic> as libmsquic.so.2 alongside
+          # cfd (CFD_FETCH_MSQUIC only; no-op for targets that don't build msquic).
+          [ -f "${BUILD}/src/libmsquic.so.2" ] && \
+            cp "${BUILD}/src/libmsquic.so.2" "${DIST}/" || true
 
       - name: upload artifact
         uses: actions/upload-artifact@v4

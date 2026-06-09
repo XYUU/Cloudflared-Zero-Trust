@@ -228,18 +228,18 @@ public:
         ctx->buf.assign(
             static_cast<const std::uint8_t*>(src),
             static_cast<const std::uint8_t*>(src) + size);
+        // qb lives inside the heap-allocated ctx so it outlives this stack frame.
+        // msquic reads qb asynchronously on its worker thread until SEND_COMPLETE.
+        ctx->qb.Buffer = ctx->buf.data();
+        ctx->qb.Length = static_cast<std::uint32_t>(ctx->buf.size());
 
         auto paf = kj::newPromiseAndCrossThreadFulfiller<void>();
         ctx->fulfiller = kj::mv(paf.fulfiller);
 
-        QUIC_BUFFER qb{};
-        qb.Buffer = ctx->buf.data();
-        qb.Length = static_cast<std::uint32_t>(ctx->buf.size());
-
         // Release across the C boundary; reclaimed in SEND_COMPLETE.
         RpcSendCtx* raw = ctx.release();
         const QUIC_STATUS s = api_->StreamSend(
-            stream_.get(), &qb, 1, QUIC_SEND_FLAG_NONE, raw);
+            stream_.get(), &raw->qb, 1, QUIC_SEND_FLAG_NONE, raw);
         if (QUIC_FAILED(s)) {
             // Reclaim immediately on failure.
             std::unique_ptr<RpcSendCtx> reclaim(raw);
@@ -290,10 +290,13 @@ public:
     }
 
 private:
-    // Per-RPC-write context: owns the send buffer and the cross-thread
-    // fulfiller that fires when msquic signals SEND_COMPLETE.
+    // Per-RPC-write context: owns the send buffer, the QUIC_BUFFER descriptor
+    // (must outlive StreamSend — msquic reads it asynchronously on its worker
+    // thread inside QuicStreamSendBufferRequest, BEFORE SEND_COMPLETE fires),
+    // and the cross-thread fulfiller.
     struct RpcSendCtx {
         std::vector<std::uint8_t>                      buf;
+        QUIC_BUFFER                                    qb{};
         kj::Own<kj::CrossThreadPromiseFulfiller<void>> fulfiller;
     };
 
@@ -428,7 +431,9 @@ public:
         settings.IsSet.HandshakeIdleTimeoutMs    = TRUE;
         settings.KeepAliveIntervalMs             = kKeepAliveMs;
         settings.IsSet.KeepAliveIntervalMs       = TRUE;
-        settings.PeerBidiStreamCount             = 16;
+        settings.DatagramReceiveEnabled          = TRUE;
+        settings.IsSet.DatagramReceiveEnabled    = TRUE;
+        settings.PeerBidiStreamCount             = 0;
         settings.IsSet.PeerBidiStreamCount       = TRUE;
 
         raw = nullptr;
