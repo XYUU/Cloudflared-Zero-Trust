@@ -58,7 +58,13 @@ bool eq(const char* a, const char* b) noexcept { return std::strcmp(a, b) == 0; 
 //  1 => handshake failed
 //  2 => usage/configuration error
 int main(int argc, char** argv) {
-    // User-provided probe target and protocol parameters.
+    // ----------------------------
+    // Phase 1: collect CLI inputs.
+    // ----------------------------
+    // These values represent the complete probe contract:
+    // target endpoint, TLS identity inputs, optional registration bootstrap,
+    // and runtime behavior knobs (verification mode and timeout).
+    // Defaults are chosen to match cloudflared/argotunnel expectations.
     std::string host;
     std::uint16_t port      = 7844;
     std::string alpn        = "argotunnel";
@@ -69,7 +75,9 @@ int main(int argc, char** argv) {
     bool do_register        = false;
     int  timeout_ms         = 10'000;
 
-    // Parse CLI options. Unknown/malformed arguments are handled as usage errors.
+    // Parse CLI options left-to-right.
+    // Any unknown flag, missing value, or malformed value is treated as a
+    // usage/configuration error (exit code 2) to keep probe behavior explicit.
     int i = 1;
     while (i < argc) {
         const char* arg = argv[i];
