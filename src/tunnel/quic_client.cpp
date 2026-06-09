@@ -54,11 +54,6 @@
 #  ifndef MFD_CLOEXEC
 #    define MFD_CLOEXEC 1U
 #  endif
-// Use the syscall directly to avoid header variations between glibc/musl.
-static int cfd_memfd_create(const char* name) noexcept {
-    return static_cast<int>(::syscall(SYS_memfd_create, name,
-                                      static_cast<unsigned>(MFD_CLOEXEC)));
-}
 #endif
 
 #ifdef CFD_HAVE_MSQUIC
