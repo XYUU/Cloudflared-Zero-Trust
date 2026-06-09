@@ -58,19 +58,27 @@ int main(int argc, char** argv) {
     bool do_register        = false;
     int  timeout_ms         = 10'000;
 
-    for (int i = 1; i < argc; ++i) {
-        if      (eq(argv[i], "--host")        && i + 1 < argc) host = argv[++i];
-        else if (eq(argv[i], "--port")        && i + 1 < argc) port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
-        else if (eq(argv[i], "--alpn")        && i + 1 < argc) alpn = argv[++i];
-        else if (eq(argv[i], "--server-name") && i + 1 < argc) server_name = argv[++i];
-        else if (eq(argv[i], "--ca-bundle")   && i + 1 < argc) ca_bundle = argv[++i];
-        else if (eq(argv[i], "--cert")        && i + 1 < argc) cert = argv[++i];
-        else if (eq(argv[i], "--key")         && i + 1 < argc) key  = argv[++i];
-        else if (eq(argv[i], "--insecure"))                     insecure = true;
-        else if (eq(argv[i], "--register"))                     do_register = true;
-        else if (eq(argv[i], "--config")      && i + 1 < argc) config_path = argv[++i];
-        else if (eq(argv[i], "--timeout-ms")  && i + 1 < argc) timeout_ms = std::atoi(argv[++i]);
-        else if (eq(argv[i], "-h") || eq(argv[i], "--help")) { usage(); return 0; }
+    int i = 1;
+    while (i < argc) {
+        const char* arg = argv[i];
+        if (eq(arg, "--host") || eq(arg, "--port") || eq(arg, "--alpn") ||
+            eq(arg, "--server-name") || eq(arg, "--ca-bundle") || eq(arg, "--cert") ||
+            eq(arg, "--key") || eq(arg, "--config") || eq(arg, "--timeout-ms")) {
+            if (i + 1 >= argc) { usage(); return 2; }
+        }
+
+        if      (eq(arg, "--host"))        { host = argv[i + 1]; i += 2; }
+        else if (eq(arg, "--port"))        { port = static_cast<std::uint16_t>(std::atoi(argv[i + 1])); i += 2; }
+        else if (eq(arg, "--alpn"))        { alpn = argv[i + 1]; i += 2; }
+        else if (eq(arg, "--server-name")) { server_name = argv[i + 1]; i += 2; }
+        else if (eq(arg, "--ca-bundle"))   { ca_bundle = argv[i + 1]; i += 2; }
+        else if (eq(arg, "--cert"))        { cert = argv[i + 1]; i += 2; }
+        else if (eq(arg, "--key"))         { key  = argv[i + 1]; i += 2; }
+        else if (eq(arg, "--insecure"))    { insecure = true; ++i; }
+        else if (eq(arg, "--register"))    { do_register = true; ++i; }
+        else if (eq(arg, "--config"))      { config_path = argv[i + 1]; i += 2; }
+        else if (eq(arg, "--timeout-ms"))  { timeout_ms = std::atoi(argv[i + 1]); i += 2; }
+        else if (eq(arg, "-h") || eq(arg, "--help")) { usage(); return 0; }
         else { usage(); return 2; }
     }
     if (host.empty() && config_path.empty()) { usage(); return 2; }
