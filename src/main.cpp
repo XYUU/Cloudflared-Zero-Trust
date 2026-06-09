@@ -142,12 +142,22 @@ public:
 int main(int argc, char** argv) {
     std::string cfg_path;
     bool verbose = false;
-    for (int i = 1; i < argc; ++i) {
+    int i = 1;
+    while (i < argc) {
         std::string a = argv[i];
-        if      (a == "--config" && i + 1 < argc) cfg_path = argv[++i];
-        else if (a == "--verbose")                 verbose  = true;
-        else if (a == "--help" || a == "-h")       { print_usage(); return 0; }
-        else                                       { print_usage(); return 2; }
+        if (a == "--config" && i + 1 < argc) {
+            cfg_path = argv[i + 1];
+            i += 2;
+        } else if (a == "--verbose") {
+            verbose = true;
+            ++i;
+        } else if (a == "--help" || a == "-h") {
+            print_usage();
+            return 0;
+        } else {
+            print_usage();
+            return 2;
+        }
     }
     if (cfg_path.empty()) { print_usage(); return 2; }
 
