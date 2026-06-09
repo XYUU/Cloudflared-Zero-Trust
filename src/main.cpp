@@ -188,10 +188,10 @@ int main(int argc, char** argv) {
         LOG_ERROR("tun configure: %s", ec.message().c_str());
         return 1;
     }
-    for (std::size_t i = 1; i < cfg.routed_cidrs.size(); ++i) {
-        if (auto ec = tun->add_route(cfg.routed_cidrs[i]); ec) {
+    for (std::size_t route_idx = 1; route_idx < cfg.routed_cidrs.size(); ++route_idx) {
+        if (auto ec = tun->add_route(cfg.routed_cidrs[route_idx]); ec) {
             LOG_ERROR("add_route %s: %s",
-                      cfg.routed_cidrs[i].to_string().c_str(),
+                      cfg.routed_cidrs[route_idx].to_string().c_str(),
                       ec.message().c_str());
             return 1;
         }
