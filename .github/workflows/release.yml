@@ -19,9 +19,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64,  apt: '',                              prefix: '',                          toolchain: '' }
-          - { target: mipsel,  apt: gcc-mipsel-linux-gnu g++-mipsel-linux-gnu,    prefix: mipsel-linux-gnu-,            toolchain: cmake/toolchains/mipsel-openwrt-musl.cmake }
-          - { target: arm,     apt: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf, prefix: arm-linux-gnueabihf-,      toolchain: cmake/toolchains/arm-openwrt-musl.cmake     }
+          - { target: x86_64,   apt: '',                                            prefix: '',                          toolchain: '' }
+          - { target: mipsel,   apt: gcc-mipsel-linux-gnu g++-mipsel-linux-gnu,     prefix: mipsel-linux-gnu-,           toolchain: cmake/toolchains/mipsel-openwrt-musl.cmake }
+          - { target: arm,      apt: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf, prefix: arm-linux-gnueabihf-,      toolchain: cmake/toolchains/arm-openwrt-musl.cmake }
+          - { target: arm-eabi5, apt: gcc-arm-linux-gnueabi g++-arm-linux-gnueabi, prefix: arm-buildroot-linux-musleabi-, toolchain: cmake/toolchains/arm-eabi5-openwrt-musl.cmake }
     steps:
       - uses: actions/checkout@v4
 
