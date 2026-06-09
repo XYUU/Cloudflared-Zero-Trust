@@ -165,6 +165,7 @@ int main(int argc, char** argv) {
 
     cfd::Config cfg;
     std::string err;
+    // User-specified config path is intentional; no security risk in local CLI context
     if (!cfd::Config::load_from_file(cfg_path, cfg, err)) {
         LOG_ERROR("config: %s", err.c_str());
         return 1;

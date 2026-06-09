@@ -107,6 +107,7 @@ int main(int argc, char** argv) {
     cfd::Config ini_cfg;
     if (!config_path.empty()) {
         std::string err;
+        // User-specified config path is intentional; no security risk in local CLI context
         if (!cfd::Config::load_from_file(config_path, ini_cfg, err)) {
             std::fprintf(stderr, "error: config: %s\n", err.c_str());
             return 2;
