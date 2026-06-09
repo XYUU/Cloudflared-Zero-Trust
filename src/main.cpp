@@ -295,9 +295,9 @@ int main(int argc, char** argv) {
     std::vector<std::thread> conn_threads;
     conn_threads.reserve(static_cast<std::size_t>(kNumHaConns));
 
-    for (int i = 0; i < kNumHaConns; ++i) {
-        conn_threads.emplace_back([&, i]() {
-            auto& cl = clients[static_cast<std::size_t>(i)];
+    for (int conn_idx = 0; conn_idx < kNumHaConns; ++conn_idx) {
+        conn_threads.emplace_back([&, conn_idx]() {
+            auto& cl = clients[static_cast<std::size_t>(conn_idx)];
 
             // disc_fired is set from the msquic worker thread via the callback;
             // g_wakeup_cv wakes the wait() below.
