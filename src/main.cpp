@@ -221,9 +221,9 @@ int main(int argc, char** argv) {
     // ---- Create NUM_HA_CONNS QuicClient instances ---------------------------
     std::vector<std::shared_ptr<cfd::tunnel::QuicClient>> clients;
     clients.reserve(static_cast<std::size_t>(kNumHaConns));
-    for (int i = 0; i < kNumHaConns; ++i) {
+    for (int conn_idx = 0; conn_idx < kNumHaConns; ++conn_idx) {
         cfd::tunnel::QuicConfig qcfg;
-        qcfg.edge_host        = edge_ips[static_cast<std::size_t>(i)];
+        qcfg.edge_host        = edge_ips[static_cast<std::size_t>(conn_idx)];
         qcfg.edge_port        = cfg.edge_port;
         qcfg.ca_bundle_path   = cfg.ca_bundle_path;
         qcfg.client_cert_path = cfg.client_cert_path;
